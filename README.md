@@ -9,6 +9,8 @@ yourself.
 
 I just wanted a way to download and load defense drills without needing to re-record them each time I loaded the game.
 
+Demo: https://www.youtube.com/watch?v=hpciOVFaxrw
+
 ## Features
 
 - **Export** any combination of your 8 practice-mode recording slots to a
