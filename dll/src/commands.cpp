@@ -386,6 +386,70 @@ CopyResult copy_drill(const std::filesystem::path& src, std::string_view new_nam
     return r;
 }
 
+DrillPayload build_current_slots_payload(std::string_view drill_name,
+                                         std::string_view description) {
+    DrillPayload r;
+
+    auto cpu = opendojo::players::detect_cpu();
+
+    opendojo::drill::Drill d;
+    d.name = drill_name.empty() ? timestamp_name() : std::string(drill_name);
+    d.description = std::string(description);
+    d.character = cpu.detected ? cpu.character_name : "unknown";
+    if (cpu.detected) { d.cpu_side = opendojo::players::side_to_string(cpu.cpu_side); }
+
+    for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
+        auto slot_kind = opendojo::slot::kind(i);
+        if (slot_kind == opendojo::slot::Kind::Empty) continue;
+        char rec_name[32];
+        std::snprintf(rec_name, sizeof(rec_name), "slot %zu", i + 1);
+        if (slot_kind == opendojo::slot::Kind::MoveList) {
+            auto move_id = opendojo::slot::movelist_move_id(i);
+            d.recordings.push_back(opendojo::drill::make_movelist_recording(rec_name, move_id));
+        } else {
+            std::uint8_t bytes[opendojo::slot::SLOT_PITCH];
+            if (!opendojo::slot::read(i, bytes)) continue;
+            d.recordings.push_back(opendojo::drill::make_live_recording(rec_name, bytes));
+        }
+    }
+    if (d.recordings.empty()) {
+        r.message = "no slots contain recordings to upload";
+        return r;
+    }
+
+    r.text = opendojo::drill::encode_text(d);
+    r.name = d.name;
+    r.description = d.description;
+    r.character = d.character;
+    r.cpu_side = d.cpu_side;
+    r.recordings_count = static_cast<int>(d.recordings.size());
+    r.ok = true;
+    return r;
+}
+
+SaveResult save_drill_text(std::string_view display_name, std::string_view content) {
+    SaveResult r;
+    if (!ensure_drills_dir()) {
+        r.message = "couldn't create drills directory";
+        return r;
+    }
+    auto slug = opendojo::drill::slugify(display_name);
+    auto path = resolve_collision(drills_dir(), slug);
+    if (path.empty()) {
+        r.message = "filename collision storm — pick a different name";
+        return r;
+    }
+    if (!write_whole_file(path, content.data(), content.size())) {
+        r.message = "failed to write drill file";
+        return r;
+    }
+    r.ok = true;
+    r.path = path;
+    r.message = "saved to " + path.filename().string();
+    OPENDOJO_LOG("save_drill_text: -> %ls", path.c_str());
+    return r;
+}
+
 void show_status() {
     OPENDOJO_LOG("=== OpenDojo status ===");
     auto base = opendojo::memory::polaris_base();

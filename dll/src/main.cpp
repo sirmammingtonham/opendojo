@@ -17,6 +17,7 @@
 
 #include <thread>
 
+#include "cloud/worker.hpp"
 #include "config.hpp"
 #include "log.hpp"
 #include "memory.hpp"
@@ -60,6 +61,10 @@ void init_thread() {
     // applied if no config.json exists yet.
     opendojo::config::load();
 
+    // Background thread for blocking cloud calls (HTTPS to Supabase).
+    // Started even when cloud isn't configured — it just sits idle.
+    opendojo::cloud::worker::start();
+
     opendojo::render_hook::install();
 
     // Practice-mode lifecycle: a controller-dtor detour for exit-flush;
@@ -94,6 +99,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID /*reserved*/) {
             break;
         }
         case DLL_PROCESS_DETACH:
+            opendojo::cloud::worker::stop();
             opendojo::log::shutdown();
             opendojo::proxy::unload();
             break;

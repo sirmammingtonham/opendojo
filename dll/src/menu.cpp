@@ -3,12 +3,16 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "autosave.hpp"
+#include "cloud/cloud_ui.hpp"
 #include "commands.hpp"
 #include "config.hpp"
 #include "log.hpp"
@@ -71,10 +75,39 @@ struct State {
 
 State g_state;
 
+// Pending UI effects published from background threads (cloud worker)
+// and drained at the top of each draw(). Keeping a single small mutex
+// here rather than spreading thread-safety affordances across every
+// piece of menu state.
+struct PendingUiOps {
+    std::mutex mtx;
+    struct QueuedToast {
+        std::string text;
+        bool is_error;
+    };
+    std::vector<QueuedToast> toasts;
+    std::atomic<bool> drills_dirty{false};
+};
+PendingUiOps g_pending;
+
 void show_toast(std::string text, bool is_error = false) {
     g_state.toast.text = std::move(text);
     g_state.toast.is_error = is_error;
     g_state.toast.until = clock::now() + std::chrono::seconds(5);
+}
+
+void drain_pending_ui_ops() {
+    std::vector<PendingUiOps::QueuedToast> toasts;
+    {
+        std::lock_guard lk(g_pending.mtx);
+        toasts.swap(g_pending.toasts);
+    }
+    if (g_pending.drills_dirty.exchange(false)) { g_state.drills_dirty = true; }
+    // If multiple toasts queued, the last one wins — that matches the
+    // single-slot toast UI we already have.
+    for (auto& t : toasts) {
+        show_toast(std::move(t.text), t.is_error);
+    }
 }
 
 void refresh_drills_if_needed() {
@@ -395,6 +428,12 @@ void draw_recordings_tab() {
         ImGui::SameLine();
         ImGui::TextDisabled("(record or pick a move first)");
     }
+
+    // Upload-to-cloud entry point. Disabled when offline / not configured
+    // or when there's nothing to upload. The cloud module owns the
+    // worker dispatch + toast plumbing.
+    opendojo::cloud::ui::draw_upload_export_row(can_export, g_state.export_name,
+                                                g_state.export_description);
 }
 
 // Render a user-readable label for a Win32 virtual-key code. Uses
@@ -568,7 +607,17 @@ void invalidate() {
     g_state.needs_focus = true;
 }
 
+void queue_toast(std::string text, bool is_error) {
+    std::lock_guard lk(g_pending.mtx);
+    g_pending.toasts.push_back({std::move(text), is_error});
+}
+
+void queue_drills_refresh() {
+    g_pending.drills_dirty.store(true);
+}
+
 void draw() {
+    drain_pending_ui_ops();
     refresh_drills_if_needed();
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -611,9 +660,8 @@ void draw() {
         void (*draw)();
     };
     const TabDef tabs[] = {
-        {"Drills", &draw_drills_tab},
-        {"Export", &draw_recordings_tab},
-        {"Settings", &draw_settings_tab},
+        {"Drills", &draw_drills_tab},     {"Browse", &opendojo::cloud::ui::draw_browse_tab},
+        {"Export", &draw_recordings_tab}, {"Settings", &draw_settings_tab},
         {"About", &draw_about_tab},
     };
     constexpr int kTabCount = static_cast<int>(sizeof(tabs) / sizeof(tabs[0]));

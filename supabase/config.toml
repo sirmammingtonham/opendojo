@@ -1,0 +1,32 @@
+# Supabase CLI project config. Most fields are CLI-local defaults — the
+# real project lives at https://supabase.com/dashboard. The CLI uses this
+# file to know which `project_id` to push migrations to, and the values
+# under [auth] / [functions] mirror what's set in the dashboard so the
+# CLI can drift-check.
+#
+# Set project_id after running: supabase link --project-ref <ref>
+
+project_id = "opendojo"
+
+[api]
+enabled = true
+# Cap the page size on every PostgREST request, including ones that
+# don't pass an explicit `Range` / `limit`. This is the single most
+# important cost guard — it prevents a malicious client from issuing
+# `SELECT * FROM drill_summaries` and pulling the whole table.
+max_rows = 50
+
+[auth]
+enabled = true
+# Anonymous sign-ins are how the mod identifies installs without
+# requiring users to create accounts. Each install gets a stable
+# user_id we can rate-limit against.
+enable_anonymous_sign_ins = true
+# Don't allow real signups via the public API — we only want anon.
+enable_signup = false
+
+[functions.submit_drill]
+verify_jwt = true
+
+[db]
+major_version = 15

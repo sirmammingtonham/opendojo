@@ -82,4 +82,37 @@ ExportResult export_current_slots(std::string_view drill_name, std::string_view 
 // the log. Useful from the menu's "Show status" button.
 void show_status();
 
+// Write a drill text blob (already-formatted .drill.txt body) into
+// opendojo/, using `display_name` as the basis for the filename slug.
+// Collisions get a `_2`/`_3` suffix. On success returns the resulting
+// path; on failure path is empty and `message` says why. Used by the
+// cloud Browse tab when a downloaded drill needs to land on disk
+// before the player imports it via the existing Drills tab buttons.
+struct SaveResult {
+    bool ok = false;
+    std::filesystem::path path;
+    std::string message;
+};
+SaveResult save_drill_text(std::string_view display_name, std::string_view content);
+
+// Compose an encoded drill (the same text export_current_slots would
+// write to disk) from the live slot state, plus the metadata the
+// upload API needs alongside it. Returns ok=false with `message` if
+// there are no recordings to capture. No filesystem I/O.
+//
+// Used by the cloud Upload path so we can ship a drill straight to
+// the server without forcing a local file. The character / cpu_side
+// fields autodetect the same way export_current_slots does.
+struct DrillPayload {
+    bool ok = false;
+    std::string message;
+    std::string text;
+    std::string name;  // normalized name (timestamp if blank)
+    std::string description;
+    std::string character;  // lowercase id; "unknown" if unset
+    std::string cpu_side;   // "p1", "p2", or ""
+    int recordings_count = 0;
+};
+DrillPayload build_current_slots_payload(std::string_view drill_name, std::string_view description);
+
 }  // namespace opendojo::commands

@@ -58,3 +58,12 @@ Thumbs.db
 *.drill
 *.bin
 snapshots/
+
+# Supabase CLI local state and any local-only project files
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+supabase/.env.local
+
+# Rust target dir (research crate)
+dll/target/

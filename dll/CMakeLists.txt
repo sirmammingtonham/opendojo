@@ -63,6 +63,21 @@ if(MSVC AND TARGET minhook)
     target_compile_options(minhook PRIVATE /W0)
 endif()
 
+# ---------------------------------------------------------------------------
+# nlohmann/json — header-only JSON for the cloud client (Supabase API +
+# anon-auth token persistence). Pinned to a stable tag; fetched once and
+# cached under build/_deps/.
+# ---------------------------------------------------------------------------
+set(JSON_BuildTests        OFF CACHE INTERNAL "")
+set(JSON_Install           OFF CACHE INTERNAL "")
+set(JSON_MultipleHeaders   OFF CACHE INTERNAL "")
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(nlohmann_json)
+
 add_library(imgui_static STATIC
     "${imgui_SOURCE_DIR}/imgui.cpp"
     "${imgui_SOURCE_DIR}/imgui_draw.cpp"
@@ -123,18 +138,47 @@ add_library(opendojo SHARED
     src/slot.cpp
     src/subsystems.cpp
     src/theme.cpp
+    src/cloud/api.cpp
+    src/cloud/auth.cpp
+    src/cloud/cloud.cpp
+    src/cloud/cloud_ui.cpp
+    src/cloud/http.cpp
+    src/cloud/worker.cpp
     "${OPENDOJO_PROXY_SRC}")
 
 target_include_directories(opendojo PRIVATE src)
 target_link_libraries(opendojo PRIVATE
     imgui_static
     minhook
+    nlohmann_json::nlohmann_json
     user32
+    winhttp
+    bcrypt
     d3d12
     dxgi
     d3dcompiler
     dxguid)
 target_link_options(opendojo PRIVATE "/DEF:${OPENDOJO_PROXY_DEF}")
+
+# ---------------------------------------------------------------------------
+# Cloud backend coordinates. Empty defaults are intentional — a build with
+# unset values still compiles, but the in-game Browse/Upload features
+# detect the missing config and show "cloud not configured" instead of
+# trying to talk to a phantom server.
+#
+# To enable cloud features:
+#   cmake -B build -S . -A x64 \
+#         -DOPENDOJO_SUPABASE_URL="https://<ref>.supabase.co" \
+#         -DOPENDOJO_SUPABASE_ANON_KEY="<anon public key>"
+# ---------------------------------------------------------------------------
+set(OPENDOJO_SUPABASE_URL ""
+    CACHE STRING "Supabase project URL, e.g. https://<ref>.supabase.co")
+set(OPENDOJO_SUPABASE_ANON_KEY ""
+    CACHE STRING "Supabase public anon key (safe to ship in the DLL)")
+
+target_compile_definitions(opendojo PRIVATE
+    "OPENDOJO_SUPABASE_URL=\"${OPENDOJO_SUPABASE_URL}\""
+    "OPENDOJO_SUPABASE_ANON_KEY=\"${OPENDOJO_SUPABASE_ANON_KEY}\"")
 
 # Output filename = the proxy DLL name we're impersonating, no "lib" prefix.
 set_target_properties(opendojo PROPERTIES
@@ -160,7 +204,9 @@ find_program(OPENDOJO_CLANG_FORMAT
 if(OPENDOJO_CLANG_FORMAT)
     file(GLOB OPENDOJO_FORMAT_SRCS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/cloud/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/cloud/*.hpp")
     add_custom_command(TARGET opendojo PRE_BUILD
         COMMAND ${OPENDOJO_CLANG_FORMAT} -i -style=file ${OPENDOJO_FORMAT_SRCS}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

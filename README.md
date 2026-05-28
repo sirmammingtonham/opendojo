@@ -17,6 +17,9 @@ Demo: https://www.youtube.com/watch?v=hpciOVFaxrw
   shareable `.drill.txt` text file
 - **Import** drills back into your slots ("Add to empty slots" or
   "Replace all")
+- **OpenDojo Cloud** (in-game): browse drills uploaded by other players,
+  filter to your CPU character, one-click download. Upload your own drills
+  in one click from the Export tab — no account, no signup
 - **Autosave per character**: opt in and your last recording is snapshotted
   per CPU character and restored when you load against that character again
 - In-game overlay menu with keyboard + controller navigation
@@ -55,8 +58,14 @@ you save a drill. Your drills, autosaves, and config live there.
   **Add** button (load into empty recording slots; refuses if too few are
   free) and **Replace** (clear all slots, then load the drill). Filter
   defaults to the live CPU character; toggle "Show all" to see everything.
-- **Export** — save the currently-occupied slots as a new drill file.
-  Name + description are optional; CPU character and side are autodetected
+- **Browse** — search OpenDojo Cloud for drills other players have
+  uploaded. Filter to your current CPU character, sort by newest or
+  most-downloaded, click **Download** to save into your local
+  `opendojo/` folder. Downloads land alongside your own drills and
+  show up in the Drills tab on the next refresh.
+- **Export** — save the currently-occupied slots as a new drill file
+  (local) and/or upload them to OpenDojo Cloud (community). Name and
+  description are optional; CPU character and side are autodetected
   from the live match.
 - **Settings** — autosave toggle and key/controller rebinding.
 - **About** — version + current binds.
@@ -117,6 +126,31 @@ cmake -B dll/build -S dll -A x64 -DOPENDOJO_DEPLOY_DIR="D:/Games/TEKKEN 8/Polari
 
 If `clang-format` is on the path or in a known VS install, it runs
 automatically before each build to keep the source tree formatted.
+
+### Cloud-enabled builds
+
+To enable the in-game Browse + Upload features the DLL needs the URL
+and public anon key of a Supabase project. See `supabase/README.md`
+for the one-time backend setup; the build command then becomes:
+
+```powershell
+cmake -B dll/build -S dll -A x64 `
+      -DOPENDOJO_SUPABASE_URL="https://<your-ref>.supabase.co" `
+      -DOPENDOJO_SUPABASE_ANON_KEY="<your anon public key>"
+cmake --build dll/build --config Release
+```
+
+A DLL built without those values still works — the Browse tab just
+shows a "cloud not configured" message.
+
+## Monorepo layout
+
+- `dll/` — the mod itself (C++, Win32, ImGui).
+- `supabase/` — schema, RLS, Edge Function. Stand up your own backend
+  by following `supabase/README.md`.
+- `docs/` — reverse-engineering notes from when the mod was being
+  built; not relevant to running it.
+- `research/` — Cheat Engine + Lua scratch work; same disclaimer.
 
 ## Compatibility
 
