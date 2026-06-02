@@ -142,6 +142,7 @@ add_library(opendojo SHARED
     src/cloud/auth.cpp
     src/cloud/cloud.cpp
     src/cloud/cloud_ui.cpp
+    src/cloud/handle.cpp
     src/cloud/http.cpp
     src/cloud/worker.cpp
     "${OPENDOJO_PROXY_SRC}")
@@ -176,9 +177,17 @@ set(OPENDOJO_SUPABASE_URL ""
 set(OPENDOJO_SUPABASE_ANON_KEY ""
     CACHE STRING "Supabase public anon key (safe to ship in the DLL)")
 
+# Tekken patch version this DLL targets. Recorded against every drill
+# uploaded from this build, so the Browse tab can warn when downloading
+# a drill recorded on an incompatible patch. Bump when the mod's
+# signatures.cpp / offsets are updated for a new game patch.
+set(OPENDOJO_TEKKEN_VERSION "3.00.02"
+    CACHE STRING "Tekken 8 version this DLL was built for (free-form, e.g. 3.00.02)")
+
 target_compile_definitions(opendojo PRIVATE
     "OPENDOJO_SUPABASE_URL=\"${OPENDOJO_SUPABASE_URL}\""
-    "OPENDOJO_SUPABASE_ANON_KEY=\"${OPENDOJO_SUPABASE_ANON_KEY}\"")
+    "OPENDOJO_SUPABASE_ANON_KEY=\"${OPENDOJO_SUPABASE_ANON_KEY}\""
+    "OPENDOJO_TEKKEN_VERSION=\"${OPENDOJO_TEKKEN_VERSION}\"")
 
 # Output filename = the proxy DLL name we're impersonating, no "lib" prefix.
 set_target_properties(opendojo PROPERTIES

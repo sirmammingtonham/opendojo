@@ -112,6 +112,22 @@ Response do_request(const std::string& url, const std::wstring& verb,
     WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &disable_redirects,
                      sizeof(disable_redirects));
 
+    // Transparent gzip/deflate. WinHTTP injects Accept-Encoding into
+    // the request and unwraps Content-Encoding from the response, so
+    // ReadData returns plain bytes. Drill JSON compresses to roughly
+    // 15-25% of raw, which directly trims our Supabase bandwidth
+    // budget on every list + download.
+    //
+    // Added in Win8.1; guarded so older SDK headers still compile.
+#ifdef WINHTTP_OPTION_DECOMPRESSION
+    {
+        DWORD decompress = WINHTTP_DECOMPRESSION_FLAG_GZIP | WINHTTP_DECOMPRESSION_FLAG_DEFLATE;
+        // Failure here is non-fatal — the request will just go out
+        // without Accept-Encoding and we'll receive uncompressed bytes.
+        WinHttpSetOption(request, WINHTTP_OPTION_DECOMPRESSION, &decompress, sizeof(decompress));
+    }
+#endif
+
     auto hdrs = build_headers(headers);
     const wchar_t* hdr_ptr = hdrs.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : hdrs.c_str();
     DWORD hdr_len = hdrs.empty() ? 0 : (DWORD)-1;

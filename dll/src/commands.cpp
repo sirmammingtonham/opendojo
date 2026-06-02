@@ -450,6 +450,24 @@ SaveResult save_drill_text(std::string_view display_name, std::string_view conte
     return r;
 }
 
+DeleteResult delete_drill(const std::filesystem::path& path) {
+    DeleteResult r;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        r.message = "file already gone";
+        return r;
+    }
+    if (!std::filesystem::remove(path, ec)) {
+        r.message = ec ? ec.message() : "failed to remove file";
+        OPENDOJO_LOG("delete_drill: %ls -> %s", path.c_str(), r.message.c_str());
+        return r;
+    }
+    r.ok = true;
+    r.message = "deleted " + path.filename().string();
+    OPENDOJO_LOG("delete_drill: removed %ls", path.c_str());
+    return r;
+}
+
 void show_status() {
     OPENDOJO_LOG("=== OpenDojo status ===");
     auto base = opendojo::memory::polaris_base();

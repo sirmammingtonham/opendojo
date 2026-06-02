@@ -56,7 +56,10 @@ struct State {
 
     // Export form buffers.
     char export_name[96] = "";
-    char export_description[160] = "";
+    // Description allows newlines + a few paragraphs. Server caps at
+    // 1000 chars; we give the buffer extra headroom for IME / pasted
+    // text the user will trim before submitting.
+    char export_description[1024] = "";
 
     // Set whenever the window transitions from hidden -> visible. Used
     // to claim window focus + set initial nav focus on the first frame
@@ -71,6 +74,17 @@ struct State {
     int pending_tab = -1;
 
     ToastState toast;
+
+    // Pending local-drill deletion target — set when the user clicks
+    // Delete on any drill in the Drills tab, consumed by the modal
+    // popup. Path is the file to remove; name is shown in the prompt.
+    // We use a deferred-open flag rather than calling OpenPopup at
+    // the click site because the click is inside a PushID(idx) scope;
+    // OpenPopup's id binds to the current ID stack, while the
+    // BeginPopupModal at the tab root uses the unqualified id.
+    std::filesystem::path delete_path;
+    std::string delete_name;
+    bool delete_modal_open_requested = false;
 };
 
 State g_state;
@@ -94,6 +108,28 @@ void show_toast(std::string text, bool is_error = false) {
     g_state.toast.text = std::move(text);
     g_state.toast.is_error = is_error;
     g_state.toast.until = clock::now() + std::chrono::seconds(5);
+}
+
+// Small destructive-action button. Same shape as Button but
+// hot-tinted so the eye notices it before the click. Used for
+// Delete affordances in Drills + Browse + confirmation modals.
+bool destructive_button(const char* label, const ImVec2& size = ImVec2(0, 0)) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.42f, 0.18f, 0.18f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.24f, 0.24f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.72f, 0.28f, 0.28f, 1.0f));
+    bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor(3);
+    return clicked;
+}
+
+// Same shape but for SmallButton (used by the autosave row).
+bool destructive_small_button(const char* label) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.42f, 0.18f, 0.18f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.24f, 0.24f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.72f, 0.28f, 0.28f, 1.0f));
+    bool clicked = ImGui::SmallButton(label);
+    ImGui::PopStyleColor(3);
+    return clicked;
 }
 
 void drain_pending_ui_ops() {
@@ -241,6 +277,12 @@ void draw_drills_tab() {
                 show_toast(r.message, !r.ok);
                 if (r.ok) g_state.drills_dirty = true;
             }
+            ImGui::SameLine();
+            if (destructive_small_button("Delete##autosave_delete")) {
+                g_state.delete_path = d.path;
+                g_state.delete_name = d.name;
+                g_state.delete_modal_open_requested = true;
+            }
             ImGui::PopID();
         }
         ImGui::Spacing();
@@ -255,7 +297,7 @@ void draw_drills_tab() {
         if (!autosave_idxs.empty()) {
             ImGui::TextDisabled("No saved drills yet — use Export or \"Save as drill\" above.");
         }
-    } else if (ImGui::BeginTable("drills", 5, flags, ImVec2(0, 320))) {
+    } else if (ImGui::BeginTable("drills", 6, flags, ImVec2(0, 320))) {
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.4f);
         ImGui::TableSetupColumn("Character", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("Recordings", ImGuiTableColumnFlags_WidthStretch, 0.8f);
@@ -265,8 +307,10 @@ void draw_drills_tab() {
         const auto pad = ImGui::GetStyle().FramePadding.x;
         const float add_w = ImGui::CalcTextSize("Add").x + pad * 4;
         const float repl_w = ImGui::CalcTextSize("Replace").x + pad * 4;
+        const float del_w = ImGui::CalcTextSize("Delete").x + pad * 4;
         ImGui::TableSetupColumn("Add", ImGuiTableColumnFlags_WidthFixed, add_w);
         ImGui::TableSetupColumn("Replace", ImGuiTableColumnFlags_WidthFixed, repl_w);
+        ImGui::TableSetupColumn("Delete", ImGuiTableColumnFlags_WidthFixed, del_w);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -307,6 +351,13 @@ void draw_drills_tab() {
                 show_toast(r.message, !r.ok);
             }
 
+            ImGui::TableSetColumnIndex(5);
+            if (destructive_button("Delete##delete", ImVec2(-1, 0))) {
+                g_state.delete_path = d.path;
+                g_state.delete_name = d.name;
+                g_state.delete_modal_open_requested = true;
+            }
+
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -322,6 +373,36 @@ void draw_drills_tab() {
     ImGui::Spacing();
     ImGui::TextDisabled("Add: load into empty recording slots (refuses if too few are free).");
     ImGui::TextDisabled("Replace: clear all recordings, then load from the drill.");
+    ImGui::TextDisabled("Delete: permanently remove the drill file from opendojo/.");
+
+    // ---- Delete confirmation modal --------------------------------------
+    // OpenPopup must be called at the same ID-stack scope as
+    // BeginPopupModal; the in-loop click sites set a flag instead
+    // and we consume it here at the tab root.
+    if (g_state.delete_modal_open_requested) {
+        g_state.delete_modal_open_requested = false;
+        ImGui::OpenPopup("DeleteLocalDrill");
+    }
+    if (ImGui::BeginPopupModal("DeleteLocalDrill", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Delete this drill?");
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1), "%s", g_state.delete_name.c_str());
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "This removes the .drill.txt from your opendojo/ folder. "
+            "Other people's copies are unaffected. This can't be undone.");
+        ImGui::Spacing();
+
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (destructive_button("Delete", ImVec2(120, 0))) {
+            auto r = opendojo::commands::delete_drill(g_state.delete_path);
+            show_toast(r.message, !r.ok);
+            if (r.ok) g_state.drills_dirty = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 }
 
 void draw_recordings_tab() {
@@ -403,9 +484,13 @@ void draw_recordings_tab() {
 
     ImGui::PushItemWidth(420);
     ImGui::InputText("Name", g_state.export_name, sizeof(g_state.export_name));
-    ImGui::InputText("Description", g_state.export_description, sizeof(g_state.export_description));
     ImGui::PopItemWidth();
-    ImGui::TextDisabled("Leave name blank for timestamp.");
+    // Description gets its own multi-line box. Sized to ~4 lines at the
+    // current font; ImGui scrolls vertically once the user exceeds that.
+    ImGui::InputTextMultiline(
+        "Description (optional)", g_state.export_description, sizeof(g_state.export_description),
+        ImVec2(420, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2));
+    ImGui::TextDisabled("Leave name blank for an auto timestamp.");
 
     ImGui::Spacing();
 
@@ -566,6 +651,11 @@ void draw_settings_tab() {
 
         ImGui::EndTable();
     }
+
+    // Cloud-related settings (currently just the author handle) live
+    // in the cloud module; rendered here so they sit alongside the
+    // other persisted preferences.
+    opendojo::cloud::ui::draw_settings_section();
 }
 
 void draw_about_tab() {
@@ -625,8 +715,11 @@ void draw() {
     // at every resolution. Clamped so it doesn't get absurdly small
     // on tiny windows or absurdly large on ultrawide.
     auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
-    const ImVec2 size(clampf(vp->WorkSize.x * 0.50f, 900.0f, 1400.0f),
-                      clampf(vp->WorkSize.y * 0.60f, 520.0f, 1000.0f));
+    // Width minimum bumped from 900 to 1100 so the Browse tab's
+    // character combo + tag chip row + sort/difficulty filters fit
+    // on one row without wrapping.
+    const ImVec2 size(clampf(vp->WorkSize.x * 0.55f, 1100.0f, 1500.0f),
+                      clampf(vp->WorkSize.y * 0.60f, 540.0f, 1000.0f));
     const ImVec2 pos(vp->WorkPos.x + (vp->WorkSize.x - size.x) * 0.5f,
                      vp->WorkPos.y + (vp->WorkSize.y - size.y) * 0.5f);
     ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);

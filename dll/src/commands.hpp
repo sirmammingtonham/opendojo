@@ -45,6 +45,14 @@ struct CopyResult {
 };
 CopyResult copy_drill(const std::filesystem::path& src, std::string_view new_name);
 
+// Permanently delete a drill file from disk. Returns ok=false with a
+// user-facing message on failure (file missing / locked / permission).
+struct DeleteResult {
+    bool ok = false;
+    std::string message;
+};
+DeleteResult delete_drill(const std::filesystem::path& path);
+
 // How an import places its recordings into the 8 user slots.
 enum class LoadMode {
     AppendToFree,  // Fill the lowest-index empty slots in order. If the

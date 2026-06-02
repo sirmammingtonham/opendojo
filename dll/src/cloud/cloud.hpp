@@ -1,6 +1,5 @@
 #pragma once
 
-#include <filesystem>
 #include <string>
 
 // Top-level cloud module helpers. The Supabase URL + public anon key
@@ -19,15 +18,17 @@ bool configured();
 const std::string& base_url();
 const std::string& anon_key();
 
+// Tekken patch the DLL was built for (e.g. "3.00.02"). Stamped onto
+// every uploaded drill so future patches' incompatible drills can
+// be flagged on the Browse tab. Falls back to "unknown" if the
+// CMake cache variable wasn't set.
+const std::string& game_version();
+
 // PostgREST endpoint: <base>/rest/v1
 std::string rest_url();
 // Auth endpoint:      <base>/auth/v1
 std::string auth_url();
 // Edge Functions:     <base>/functions/v1
 std::string functions_url();
-
-// Path to opendojo/cloud.json (sibling of the existing opendojo/
-// drills directory). Persistent home for the anon-auth token bundle.
-std::filesystem::path token_store_path();
 
 }  // namespace opendojo::cloud

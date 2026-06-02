@@ -3,12 +3,10 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
-#include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <string>
-#include <system_error>
 
+#include "../config.hpp"
 #include "../log.hpp"
 #include "cloud.hpp"
 #include "http.hpp"
@@ -33,45 +31,34 @@ struct Token {
 std::mutex g_mutex;
 Token g_token;
 
-nlohmann::json read_file_json(const std::filesystem::path& p) {
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return nullptr;
-    try {
-        return nlohmann::json::parse(f, /*cb*/ nullptr, /*allow_exceptions*/ false);
-    } catch (...) { return nullptr; }
-}
+// Signup backoff. After three consecutive failed anonymous signups
+// (typically caused by the per-IP signup rate limit in supabase/
+// config.toml) we stop hammering the endpoint for five minutes.
+// Without this, a user on a flaky network would burn through their
+// hourly quota on the first action and stay locked out for an hour.
+constexpr int kSignupBackoffFailures = 3;
+constexpr std::chrono::minutes kSignupBackoffWindow{5};
+int g_signup_failures = 0;
+clock::time_point g_signup_next_attempt{};
 
 void persist(const Token& t) {
-    nlohmann::json j;
-    j["access_token"] = t.access;
-    j["refresh_token"] = t.refresh;
-    j["user_id"] = t.user_id;
-    j["expires_at"] =
+    opendojo::config::AuthTokens cfg;
+    cfg.access_token = t.access;
+    cfg.refresh_token = t.refresh;
+    cfg.user_id = t.user_id;
+    cfg.expires_at_sec =
         std::chrono::duration_cast<std::chrono::seconds>(t.expires_at.time_since_epoch()).count();
-
-    auto path = opendojo::cloud::token_store_path();
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        OPENDOJO_LOG("cloud/auth: failed to write %ls", path.c_str());
-        return;
-    }
-    f << j.dump();
+    opendojo::config::set_auth_tokens(cfg);
 }
 
 bool load_from_disk(Token& out) {
-    auto path = opendojo::cloud::token_store_path();
-    auto j = read_file_json(path);
-    if (j.is_null() || !j.is_object()) return false;
-    try {
-        out.access = j.value("access_token", "");
-        out.refresh = j.value("refresh_token", "");
-        out.user_id = j.value("user_id", "");
-        auto secs = j.value("expires_at", static_cast<long long>(0));
-        out.expires_at = clock::time_point{std::chrono::seconds(secs)};
-        return !out.access.empty() && !out.refresh.empty();
-    } catch (...) { return false; }
+    auto cfg = opendojo::config::auth_tokens();
+    if (cfg.access_token.empty() || cfg.refresh_token.empty()) return false;
+    out.access = std::move(cfg.access_token);
+    out.refresh = std::move(cfg.refresh_token);
+    out.user_id = std::move(cfg.user_id);
+    out.expires_at = clock::time_point{std::chrono::seconds(cfg.expires_at_sec)};
+    return true;
 }
 
 // Parse the Supabase auth response shape:
@@ -166,16 +153,40 @@ bool ensure_valid() {
     if (!g_token.refresh.empty()) {
         if (refresh_token(g_token)) {
             persist(g_token);
+            g_signup_failures = 0;  // network OK, reset backoff
             return true;
         }
         // fall through to sign-up
     }
 
-    Token fresh;
-    if (!sign_up_anonymous(fresh)) {
-        OPENDOJO_LOG("cloud/auth: ensure_valid: anonymous signup failed");
+    // Backoff: if we've struck out repeatedly on /signup recently
+    // (typically because the per-IP rate-limit cap is tripped),
+    // skip the attempt rather than keep burning quota.
+    if (g_signup_failures >= kSignupBackoffFailures && clock::now() < g_signup_next_attempt) {
+        auto wait =
+            std::chrono::duration_cast<std::chrono::seconds>(g_signup_next_attempt - clock::now())
+                .count();
+        OPENDOJO_LOG("cloud/auth: signup backoff active — ~%llds remaining",
+                     static_cast<long long>(wait));
         return false;
     }
+
+    Token fresh;
+    if (!sign_up_anonymous(fresh)) {
+        ++g_signup_failures;
+        if (g_signup_failures >= kSignupBackoffFailures) {
+            g_signup_next_attempt = clock::now() + kSignupBackoffWindow;
+            OPENDOJO_LOG(
+                "cloud/auth: %d consecutive signup failures — pausing "
+                "retries for %lld minutes",
+                g_signup_failures, static_cast<long long>(kSignupBackoffWindow.count()));
+        } else {
+            OPENDOJO_LOG("cloud/auth: ensure_valid: anonymous signup failed (%d/%d)",
+                         g_signup_failures, kSignupBackoffFailures);
+        }
+        return false;
+    }
+    g_signup_failures = 0;
     g_token = std::move(fresh);
     persist(g_token);
     OPENDOJO_LOG("cloud/auth: anonymous identity issued (user_id=%s)", g_token.user_id.c_str());
@@ -195,8 +206,9 @@ std::string user_id() {
 void forget() {
     std::lock_guard lk(g_mutex);
     g_token = {};
-    std::error_code ec;
-    std::filesystem::remove(opendojo::cloud::token_store_path(), ec);
+    g_signup_failures = 0;
+    g_signup_next_attempt = {};
+    opendojo::config::set_auth_tokens({});
 }
 
 }  // namespace opendojo::cloud::auth

@@ -27,6 +27,19 @@ const MAX_CONTENT_BYTES = 64 * 1024;      // matches drills.content cap
 const MAX_BODY_BYTES    = 80 * 1024;      // request envelope overhead
 const MAX_RECORDINGS    = 8;              // matches in-game slot count
 const MAX_UPLOADS_PER_DAY = 50;
+const MAX_CATEGORIES    = 5;              // matches drills.categories cap
+
+// Allowed taxonomy values. These mirror the seed data in
+// drill_categories / drill_difficulties — we duplicate them here so
+// the function can reject early without a round trip to the DB.
+// If you ever add a value, add it in both places; the column-level
+// FK on `difficulty` is the safety net if they drift.
+const ALLOWED_CATEGORIES = new Set([
+    "reaction", "option_select", "fuzzy_guard", "punishment", "throw_break",
+]);
+const ALLOWED_DIFFICULTIES = new Set([
+    "beginner", "intermediate", "advanced",
+]);
 
 const SUPABASE_URL              = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY         = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -47,6 +60,9 @@ interface SubmitBody {
     recordings_count?: unknown;
     content?: unknown;
     author_handle?: unknown;
+    categories?: unknown;
+    difficulty?: unknown;
+    game_version?: unknown;
 }
 
 type Validated = {
@@ -57,6 +73,9 @@ type Validated = {
     recordings_count: number;
     content: string;
     author_handle: string | null;
+    categories: string[];
+    difficulty: string | null;
+    game_version: string | null;
 };
 
 function trimStr(v: unknown, max: number): string | null {
@@ -75,11 +94,11 @@ function validate(body: SubmitBody): { ok: Validated } | { err: string } {
 
     const description = body.description == null
         ? null
-        : (typeof body.description === "string" && body.description.length <= 240
+        : (typeof body.description === "string" && body.description.length <= 1000
             ? body.description
             : null);
     if (body.description != null && description == null) {
-        return { err: "description must be a string up to 240 chars" };
+        return { err: "description must be a string up to 1000 chars" };
     }
 
     const author_handle = body.author_handle == null
@@ -115,6 +134,47 @@ function validate(body: SubmitBody): { ok: Validated } | { err: string } {
         return { err: "content does not look like an OpenDojo drill" };
     }
 
+    // ---- Taxonomy fields -----------------------------------------------
+    // Empty array is allowed (drill without category tags). Reject any
+    // unknown id rather than silently dropping it, so the mod surfaces
+    // taxonomy drift instead of uploading mis-tagged data.
+    let categories: string[] = [];
+    if (body.categories != null) {
+        if (!Array.isArray(body.categories)) {
+            return { err: "categories must be an array of strings" };
+        }
+        if (body.categories.length > MAX_CATEGORIES) {
+            return { err: `at most ${MAX_CATEGORIES} categories` };
+        }
+        const seen = new Set<string>();
+        for (const c of body.categories) {
+            if (typeof c !== "string" || !ALLOWED_CATEGORIES.has(c)) {
+                return { err: `unknown category: ${String(c)}` };
+            }
+            seen.add(c);
+        }
+        categories = [...seen];  // dedupe while preserving validity
+    }
+
+    let difficulty: string | null = null;
+    if (body.difficulty != null) {
+        if (typeof body.difficulty !== "string" ||
+            !ALLOWED_DIFFICULTIES.has(body.difficulty)) {
+            return { err: `unknown difficulty: ${String(body.difficulty)}` };
+        }
+        difficulty = body.difficulty;
+    }
+
+    let game_version: string | null = null;
+    if (body.game_version != null) {
+        if (typeof body.game_version !== "string"
+            || body.game_version.length === 0
+            || body.game_version.length > 24) {
+            return { err: "game_version must be a string up to 24 chars" };
+        }
+        game_version = body.game_version;
+    }
+
     return {
         ok: {
             name,
@@ -124,6 +184,9 @@ function validate(body: SubmitBody): { ok: Validated } | { err: string } {
             recordings_count,
             content,
             author_handle,
+            categories,
+            difficulty,
+            game_version,
         },
     };
 }
@@ -211,6 +274,25 @@ Deno.serve(async (req) => {
         auth: { persistSession: false },
     });
 
+    // Ban check. A row in user_bans for this uid means the admin
+    // panel has flagged them; refuse uploads. We do this before
+    // dedupe so a banned user can't keep "re-uploading" to discover
+    // hashes of content others have already submitted.
+    {
+        const { data: ban, error } = await admin
+            .from("user_bans")
+            .select("user_id")
+            .eq("user_id", userId)
+            .maybeSingle();
+        if (error) {
+            console.error("ban lookup failed", error);
+            return json(500, { error: "internal error" });
+        }
+        if (ban) {
+            return json(403, { error: "This account has been banned from uploading." });
+        }
+    }
+
     // Dedupe first. If this exact content has been uploaded before,
     // return that row's id without touching rate limits or inserting
     // a new row. This means re-uploading the same drill is free
@@ -261,6 +343,9 @@ Deno.serve(async (req) => {
             content_hash:     contentHash,
             size_bytes:       sizeBytes,
             author_handle:    drill.author_handle,
+            categories:       drill.categories,
+            difficulty:       drill.difficulty,
+            game_version:     drill.game_version,
             uploader_id:      userId,
         }, { onConflict: "content_hash", ignoreDuplicates: false })
         .select("id")

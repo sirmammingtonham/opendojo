@@ -25,6 +25,15 @@ enable_anonymous_sign_ins = true
 # Don't allow real signups via the public API — we only want anon.
 enable_signup = false
 
+[auth.rate_limit]
+# Anonymous sign-ins per hour per IP. Cap aggressively — legit
+# usage is a single signup per install.
+anonymous_users    = 5
+# Token refreshes per 5-min window per IP. Each install refreshes
+# roughly hourly (JWT default lifetime), so 150 covers a busy LAN
+# while still rejecting refresh-spam.
+token_refresh      = 150
+
 [functions.submit_drill]
 verify_jwt = true
 

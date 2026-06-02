@@ -1,12 +1,13 @@
 #include "cloud.hpp"
 
-#include "../commands.hpp"
-
 #ifndef OPENDOJO_SUPABASE_URL
 #define OPENDOJO_SUPABASE_URL ""
 #endif
 #ifndef OPENDOJO_SUPABASE_ANON_KEY
 #define OPENDOJO_SUPABASE_ANON_KEY ""
+#endif
+#ifndef OPENDOJO_TEKKEN_VERSION
+#define OPENDOJO_TEKKEN_VERSION "unknown"
 #endif
 
 namespace opendojo::cloud {
@@ -14,6 +15,7 @@ namespace opendojo::cloud {
 namespace {
 const std::string g_base_url{OPENDOJO_SUPABASE_URL};
 const std::string g_anon_key{OPENDOJO_SUPABASE_ANON_KEY};
+const std::string g_game_version{OPENDOJO_TEKKEN_VERSION};
 
 std::string strip_trailing_slash(const std::string& s) {
     if (!s.empty() && s.back() == '/') return s.substr(0, s.size() - 1);
@@ -32,6 +34,10 @@ const std::string& anon_key() {
     return g_anon_key;
 }
 
+const std::string& game_version() {
+    return g_game_version;
+}
+
 std::string rest_url() {
     return strip_trailing_slash(g_base_url) + "/rest/v1";
 }
@@ -40,10 +46,6 @@ std::string auth_url() {
 }
 std::string functions_url() {
     return strip_trailing_slash(g_base_url) + "/functions/v1";
-}
-
-std::filesystem::path token_store_path() {
-    return opendojo::commands::drills_dir() / L"cloud.json";
 }
 
 }  // namespace opendojo::cloud

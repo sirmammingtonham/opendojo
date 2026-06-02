@@ -1,0 +1,1331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenDojo — UI mockup (all tabs)</title>
+<style>
+/*
+ * Visual approximation of the in-game Dear ImGui overlay. The real
+ * thing uses ImGui's default dark theme + our custom accent colors;
+ * this CSS picks values close enough that the layout & density read
+ * the same in the browser as they will in-game. Spacing, column
+ * widths, and the wider menu footprint are the things to critique.
+ *
+ * Tabs are clickable — switch between Drills / Browse / Export /
+ * Settings / About to see each pane's mockup.
+ */
+:root {
+    --bg-window:    #15151a;
+    --bg-frame:     #1c1c24;
+    --bg-row:       #1a1a22;
+    --bg-row-alt:   #1d1d27;
+    --bg-input:     #232331;
+    --bg-input-hi:  #2c2c3c;
+    --bg-button:    #29293a;
+    --bg-button-hi: #34344a;
+    --border:       #2e2e3c;
+    --text:         #e1e1ea;
+    --text-dim:     #7a7a8c;
+    --text-link:    #8fb8ff;
+    --accent:       #4a9eff;
+    --accent-soft:  #8cc3ff;
+    --green:        #7af0a0;
+    --amber:        #ffd966;
+    --red:          #ff8c66;
+    --heart-on:     #ff5d8f;
+}
+
+* { box-sizing: border-box; }
+html, body {
+    margin: 0;
+    padding: 32px;
+    background: #0d0d11;
+    color: var(--text);
+    font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+    font-size: 14px;
+}
+
+/* Outer window — matches the wider menu footprint we'd ship. The
+ * existing menu clamps to 900..1400 wide; we're proposing 1100 as
+ * the new minimum, the rest is the same. */
+.window {
+    max-width: 1100px;
+    margin: 0 auto;
+    background: var(--bg-window);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.4);
+}
+.titlebar {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    font-weight: 600;
+}
+.titlebar .close { color: var(--text-dim); cursor: pointer; }
+.tabs {
+    display: flex; gap: 2px;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--border);
+    background: #131319;
+}
+.tab {
+    padding: 8px 14px;
+    color: var(--text-dim);
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    user-select: none;
+}
+.tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+    background: var(--bg-window);
+}
+.tab:hover { color: var(--text); }
+
+.body { padding: 16px 18px 18px; }
+
+.tab-pane { display: none; }
+.tab-pane.visible { display: block; }
+
+.section-title {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-bottom: 8px;
+}
+.section-head {
+    color: var(--accent-soft);
+    font-size: 14px;
+    margin-bottom: 8px;
+}
+
+/* Generic form controls. */
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.row + .row { margin-top: 10px; }
+.divider {
+    color: var(--text-dim);
+    user-select: none;
+}
+.label-dim { color: var(--text-dim); }
+.label-inline { color: var(--text-dim); margin-right: 4px; }
+
+input[type=text], select, textarea {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 2px;
+    font-size: 14px;
+    font-family: inherit;
+}
+input[type=text]:focus, select:focus, textarea:focus {
+    background: var(--bg-input-hi);
+    outline: 1px solid var(--accent);
+    border-color: var(--accent);
+}
+input[type=text].search { flex: 1; min-width: 240px; }
+input[type=text].full { width: 420px; }
+textarea {
+    width: 420px;
+    resize: vertical;
+    line-height: 1.4;
+}
+
+input[type=checkbox] {
+    accent-color: var(--accent);
+    transform: scale(1.05);
+}
+
+button {
+    background: var(--bg-button);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 14px;
+    border-radius: 2px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+}
+button:hover { background: var(--bg-button-hi); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.accent { background: #2d4d7a; border-color: #3a6fb0; }
+button.accent:hover { background: #3a6fb0; }
+button.icon { padding: 6px 10px; }
+button.row-btn { padding: 4px 10px; font-size: 13px; }
+button.small { padding: 4px 10px; font-size: 13px; }
+
+/* Tag chip — clicked = active. */
+.chip {
+    display: inline-flex; align-items: center;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-frame);
+    color: var(--text-dim);
+    border-radius: 14px;
+    cursor: pointer;
+    font-size: 13px;
+    user-select: none;
+}
+.chip.active {
+    background: rgba(74, 158, 255, 0.18);
+    border-color: var(--accent);
+    color: var(--accent-soft);
+}
+.chip:hover { background: var(--bg-button); color: var(--text); }
+.chip.active:hover { background: rgba(74, 158, 255, 0.28); }
+
+hr.sep {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 14px 0;
+}
+
+/* Generic table styling shared across all tabs. */
+table.results, table.local {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+table.results th, table.results td,
+table.local th, table.local td {
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    padding: 9px 10px;
+    vertical-align: top;
+}
+table.results thead th, table.local thead th {
+    background: #18181f;
+    color: var(--text-dim);
+    font-weight: 500;
+    font-size: 13px;
+}
+table.results tbody tr:nth-child(odd),
+table.local tbody tr:nth-child(odd)   { background: var(--bg-row); }
+table.results tbody tr:nth-child(even),
+table.local tbody tr:nth-child(even)  { background: var(--bg-row-alt); }
+table.results tbody tr:hover,
+table.local tbody tr:hover            { background: #26263a; }
+
+/* Browse column widths — these are the proportions I'd port to the
+ * ImGui table. They're the bit I most want eyes on. */
+col.c-name       { width: 36%; }
+col.c-char       { width: 14%; }
+col.c-diff       { width: 12%; }
+col.c-stats      { width: 14%; }
+col.c-like       { width: 10%; }
+col.c-download   { width: 14%; }
+
+/* Drills (local) column widths. Metadata + a single "Actions" cell
+ * holding all three buttons inline. Keeps column count steady. */
+col.l-name       { width: 42%; }
+col.l-char       { width: 18%; }
+col.l-rec        { width: 12%; }
+col.l-actions    { width: 28%; }
+
+/* Recordings (Export tab) column widths. */
+col.r-name { width: 22%; }
+col.r-kind { width: 22%; }
+col.r-detail { width: 56%; }
+
+.name-line { font-weight: 500; }
+.meta-line {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-dim);
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+}
+.meta-tag {
+    color: var(--accent-soft);
+}
+
+/* Description: a snippet under the name/author/tags row.
+ * Collapsed: clamp to two lines with ellipsis.
+ * Expanded: full multi-line text, preserving newlines.
+ * When the drill has no description, the entire block is omitted —
+ * see row 4 in the Browse table for the empty case. */
+.desc {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: #aeaeb8;
+    line-height: 1.45;
+}
+.desc.snippet {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.desc.expanded {
+    white-space: pre-line;
+    background: #181822;
+    border-left: 2px solid var(--accent);
+    padding: 8px 10px;
+    border-radius: 0 2px 2px 0;
+}
+.desc.missing {
+    color: var(--text-dim);
+    font-style: italic;
+}
+
+/* Expand caret in the Name cell. */
+.expand-caret {
+    display: inline-block;
+    width: 14px; height: 14px;
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
+    margin-right: 6px;
+    text-align: center;
+    line-height: 14px;
+}
+.expand-caret:hover { color: var(--text); }
+.name-row { display: flex; align-items: flex-start; }
+.name-body { flex: 1; }
+
+.char-line { font-weight: 500; }
+.version-line {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+.version-line.mismatch { color: var(--red); }
+
+.diff-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: 500;
+}
+.diff-beg { background: rgba(122,240,160,.14); color: var(--green); }
+.diff-int { background: rgba(255,217,102,.14); color: var(--amber); }
+.diff-adv { background: rgba(255,140,102,.14); color: var(--red); }
+
+.stat-block { line-height: 1.5; }
+.stat-block .primary { font-size: 13px; }
+.stat-block .secondary { font-size: 12px; color: var(--text-dim); }
+
+button.like { display: flex; align-items: center; gap: 5px; }
+button.like.on { color: var(--heart-on); border-color: #5a3142; }
+button.like .heart { font-size: 14px; }
+
+.pagination {
+    display: flex; gap: 10px; align-items: center;
+    margin-top: 16px;
+}
+.pagination .page-indicator { color: var(--text-dim); margin-left: auto; }
+
+/* Footer help text. */
+.footer-help {
+    margin-top: 12px;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.subhead {
+    display: flex; justify-content: space-between; align-items: baseline;
+    color: var(--text-dim);
+}
+.subhead .count { font-size: 12px; }
+
+/* Autosaves "banner" block on the Drills tab. */
+.autosave-block {
+    background: rgba(74, 158, 255, 0.05);
+    border: 1px solid rgba(74, 158, 255, 0.2);
+    border-radius: 3px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+}
+.autosave-block .head {
+    color: var(--accent-soft);
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+.autosave-block .help {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-bottom: 8px;
+}
+.autosave-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 4px 0;
+}
+.autosave-row .name {
+    color: var(--accent-soft);
+    flex: 1;
+    font-weight: 500;
+}
+.autosave-row .count {
+    color: var(--text-dim);
+    font-size: 13px;
+}
+
+/* Status pill (Export tab "Status:" line). */
+.status-pill {
+    display: inline-flex;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12.5px;
+    font-weight: 500;
+}
+.status-good { color: var(--green); background: rgba(122,240,160,.10); }
+.status-warn { color: var(--amber); background: rgba(255,217,102,.10); }
+.status-bad  { color: var(--red);   background: rgba(255,140,102,.10); }
+
+/* Two-column Settings layout (Keyboard | Controller). */
+.bind-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-top: 6px;
+}
+.bind-cell .heading {
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+.bind-cell .current {
+    color: var(--green);
+    margin-bottom: 8px;
+}
+
+/* Form rows (label + input + helper). */
+.form-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
+.form-row .label {
+    width: 180px;
+    color: var(--text-dim);
+    padding-top: 7px;
+}
+.form-row .control { flex: 1; }
+.form-row .help {
+    margin-top: 4px;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+.form-row.full .label { padding-top: 0; }
+
+/* Right-aligned info on the Export tab status row. */
+.right-info {
+    margin-left: auto;
+    color: var(--text-dim);
+    font-size: 12.5px;
+}
+
+code {
+    background: #1f1f29;
+    padding: 1px 5px;
+    border-radius: 2px;
+    color: var(--accent-soft);
+    font-size: 12.5px;
+}
+
+/* ---------- Delete UX additions ---------- */
+
+/* Destructive button — same shape as a normal button, hot-tinted so
+ * the eye notices it before the click happens. Used for the Delete
+ * confirm button and the Delete row actions in Drills + Browse. */
+button.destructive {
+    background: rgba(255, 90, 90, 0.10);
+    border-color: rgba(255, 90, 90, 0.35);
+    color: #ffb0a3;
+}
+button.destructive:hover {
+    background: rgba(255, 90, 90, 0.18);
+    border-color: rgba(255, 90, 90, 0.55);
+    color: #ffd0c4;
+}
+
+/* Drills-tab action column groups three buttons inline. Keeps the
+ * column count steady (one Actions column vs. three) and lets us
+ * tuck Delete to the right under a wider total cell. */
+.row-actions { display: flex; gap: 6px; }
+.row-actions button { flex: 0 0 auto; }
+
+/* "Your upload" badge in Browse — appears in the meta-line next to
+ * the author so the user notices they're looking at their own row
+ * without scanning a separate column. Followed by an inline Delete
+ * link-button. */
+.owner-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 10px;
+    background: rgba(74, 158, 255, 0.18);
+    color: var(--accent-soft);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+}
+/* Owner-only Delete stacks vertically under the Download button
+ * in the rightmost column. The description block underneath the
+ * Name cell gives us enough row height to accommodate two stacked
+ * buttons without ballooning rows the user doesn't own. Gap is
+ * tighter than ImGui's default row spacing so the two reads as
+ * one action group. */
+.dl-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.dl-stack button { width: 100%; }
+
+/* Modal — shared confirmation between Drills delete and Browse
+ * owner-delete. Backdrop dims everything; the card carries the
+ * destructive action and a Cancel escape. */
+.modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(8, 8, 12, 0.65);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+}
+.modal-backdrop.visible { display: flex; }
+.modal {
+    background: var(--bg-window);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    width: 440px;
+    max-width: 90vw;
+    box-shadow: 0 14px 50px rgba(0,0,0,.55);
+    padding: 18px 20px 16px;
+}
+.modal h3 {
+    margin: 0 0 12px;
+    font-size: 15px;
+    color: var(--text);
+}
+.modal .target {
+    color: var(--accent-soft);
+    font-weight: 500;
+    margin-bottom: 6px;
+}
+.modal .body {
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.45;
+    margin-bottom: 14px;
+}
+.modal .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+</style>
+</head>
+<body>
+
+<div class="window">
+    <div class="titlebar">
+        <span id="titlebar-text">OpenDojo v0.1</span>
+        <span class="close">[x]</span>
+    </div>
+
+    <!-- =========================================================
+         Clickable tabs. Switching is handled by tiny JS at the
+         bottom of the file — toggles .active on the tab and
+         .visible on the matching .tab-pane below.
+         ========================================================= -->
+    <div class="tabs">
+        <div class="tab" data-tab="drills">Drills</div>
+        <div class="tab active" data-tab="browse">Browse</div>
+        <div class="tab" data-tab="export">Export</div>
+        <div class="tab" data-tab="settings">Settings</div>
+        <div class="tab" data-tab="about">About</div>
+    </div>
+
+    <div class="body">
+
+        <!-- =====================================================
+             DRILLS TAB — local drill files in opendojo/
+             ===================================================== -->
+        <div class="tab-pane" id="pane-drills">
+            <div class="section-title">Drills found in <code>opendojo/</code></div>
+
+            <div class="row">
+                <button>Refresh</button>
+                <span class="divider">|</span>
+                <span class="label-inline">Sort:</span>
+                <label><input type="radio" name="local-sort" checked> Name</label>
+                <label><input type="radio" name="local-sort"> Newest</label>
+                <span class="divider">|</span>
+                <label><input type="checkbox"> Show all</label>
+                <span class="divider">|</span>
+                <span class="label-dim">12 of 47 drills (filtered to jin)</span>
+            </div>
+
+            <hr class="sep">
+
+            <!-- Autosaves block — present when the player has
+                 recently practiced. Each character gets one
+                 floating autosave that gets overwritten next
+                 session; "Save as drill" turns it permanent. -->
+            <div class="autosave-block">
+                <div class="head">Auto-saves</div>
+                <div class="help">
+                    Overwritten every time you switch characters or leave practice.
+                    Click "Save as drill" to keep a copy.
+                </div>
+                <div class="autosave-row">
+                    <span class="name">_autosave_jin</span>
+                    <span class="count">(2 rec)</span>
+                    <button class="small">Add</button>
+                    <button class="small">Replace</button>
+                    <button class="small">Save as drill</button>
+                    <button class="small destructive"
+                            data-confirm-delete="local"
+                            data-name="_autosave_jin">Delete</button>
+                </div>
+                <div class="autosave-row">
+                    <span class="name">_autosave_paul</span>
+                    <span class="count">(1 rec)</span>
+                    <button class="small">Add</button>
+                    <button class="small">Replace</button>
+                    <button class="small">Save as drill</button>
+                    <button class="small destructive"
+                            data-confirm-delete="local"
+                            data-name="_autosave_paul">Delete</button>
+                </div>
+            </div>
+
+            <!-- Regular drills table. Actions: Add (fill empty slots),
+                 Replace (clear all then load), Delete (remove the
+                 .drill.txt file from opendojo/, with confirmation). -->
+            <table class="local">
+                <colgroup>
+                    <col class="l-name">
+                    <col class="l-char">
+                    <col class="l-rec">
+                    <col class="l-actions">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Character</th>
+                        <th>Recordings</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>jin_string_defense</td>
+                        <td>jin (p2)</td>
+                        <td>3</td>
+                        <td>
+                            <div class="row-actions">
+                                <button class="row-btn">Add</button>
+                                <button class="row-btn">Replace</button>
+                                <button class="row-btn destructive"
+                                        data-confirm-delete="local"
+                                        data-name="jin_string_defense">Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>jin_df2_punish_lab</td>
+                        <td>jin (p2)</td>
+                        <td>1</td>
+                        <td>
+                            <div class="row-actions">
+                                <button class="row-btn">Add</button>
+                                <button class="row-btn">Replace</button>
+                                <button class="row-btn destructive"
+                                        data-confirm-delete="local"
+                                        data-name="jin_df2_punish_lab">Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>hwoarang_flamingo_mixup</td>
+                        <td>jin (p2)</td>
+                        <td>5</td>
+                        <td>
+                            <div class="row-actions">
+                                <button class="row-btn">Add</button>
+                                <button class="row-btn">Replace</button>
+                                <button class="row-btn destructive"
+                                        data-confirm-delete="local"
+                                        data-name="hwoarang_flamingo_mixup">Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>low_parry_os</td>
+                        <td>jin (p1)</td>
+                        <td>4</td>
+                        <td>
+                            <div class="row-actions">
+                                <button class="row-btn">Add</button>
+                                <button class="row-btn">Replace</button>
+                                <button class="row-btn destructive"
+                                        data-confirm-delete="local"
+                                        data-name="low_parry_os">Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="footer-help">
+                <strong>Add</strong>: load into empty recording slots (refuses if too few are free).<br>
+                <strong>Replace</strong>: clear all recordings, then load from the drill.
+            </div>
+        </div>
+
+        <!-- =====================================================
+             BROWSE TAB — community drills from OpenDojo Cloud
+             ===================================================== -->
+        <div class="tab-pane visible" id="pane-browse">
+            <div class="section-title">Search community drills</div>
+
+            <div class="row">
+                <input type="text" class="search" placeholder="Search by name, description, or author…">
+                <button class="accent">Search</button>
+                <button title="Clear all filters and search">Clear</button>
+            </div>
+
+            <div class="row" style="margin-top: 14px;">
+                <span class="label-dim">Character:</span>
+                <select>
+                    <option>All characters</option>
+                    <option>— current CPU (Jin) —</option>
+                    <option disabled>──────────</option>
+                    <option>alisa</option>
+                    <option>asuka</option>
+                    <option>azucena</option>
+                    <option>bryan</option>
+                    <option>claudio</option>
+                    <option>devil_jin</option>
+                    <option>dragunov</option>
+                    <option>eddy</option>
+                    <option selected>jin</option>
+                    <option>kazuya</option>
+                    <option>king</option>
+                    <option>law</option>
+                    <option>leroy</option>
+                    <option>lili</option>
+                    <option>nina</option>
+                    <option>paul</option>
+                    <option>raven</option>
+                    <option>steve</option>
+                    <option>xiaoyu</option>
+                    <option>— and 16 more —</option>
+                </select>
+
+                <span class="divider">|</span>
+                <span class="label-dim">Difficulty:</span>
+                <select>
+                    <option>Any</option>
+                    <option>Beginner</option>
+                    <option selected>Intermediate</option>
+                    <option>Advanced</option>
+                </select>
+
+                <span class="divider">|</span>
+                <span class="label-dim">Sort:</span>
+                <select>
+                    <option>Newest</option>
+                    <option>Most downloaded</option>
+                    <option selected>Most liked</option>
+                </select>
+            </div>
+
+            <div class="row" style="margin-top: 14px;">
+                <span class="label-dim">Tags:</span>
+                <span class="chip active">Reaction</span>
+                <span class="chip">Option Select</span>
+                <span class="chip">Fuzzy Guard</span>
+                <span class="chip active">Punishment</span>
+                <span class="chip">Throw Break</span>
+                <span class="label-dim" style="margin-left: 6px;">(OR match — drill with any selected tag)</span>
+            </div>
+
+            <hr class="sep">
+
+            <div class="subhead">
+                <span>Showing 14 of ~120 community drills</span>
+                <span class="count">Page 1 of 9</span>
+            </div>
+
+            <table class="results" style="margin-top: 8px;">
+                <colgroup>
+                    <col class="c-name">
+                    <col class="c-char">
+                    <col class="c-diff">
+                    <col class="c-stats">
+                    <col class="c-like">
+                    <col class="c-download">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Character</th>
+                        <th>Difficulty</th>
+                        <th>Stats</th>
+                        <th>Like</th>
+                        <th>Download</th>
+                    </tr>
+                </thead>
+                <tbody>
+
+                    <!-- Row 1 — expanded. Demonstrates full
+                         multi-paragraph description rendering. -->
+                    <tr>
+                        <td>
+                            <div class="name-row">
+                                <span class="expand-caret" title="Collapse">▾</span>
+                                <div class="name-body">
+                                    <div class="name-line">jin string defense</div>
+                                    <div class="meta-line">
+                                        <span>by Komugi</span>
+                                        <span class="meta-tag">#reaction</span>
+                                        <span class="meta-tag">#punishment</span>
+                                    </div>
+                                    <div class="desc expanded">CPU runs Jin's classic d/f+1, 4 string and the d/f+1, 2 mixup at neutral. Block low after d/f+1, then jab-check the high. Frame data:
+- d/f+1 on block: -3
+- 4: +5 on block, hit-confirm into d/f+2
+- 2: -9 (launch-punishable with f+4)
+
+Designed for sparring partners learning matchup defense — pause at the freeze frame to confirm what they pressed. Includes a recording where CPU does nothing so you can practice the punish window with no follow-up.</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            <div class="char-line">jin (p2)</div>
+                            <div class="version-line">v3.00.02</div>
+                        </td>
+                        <td><span class="diff-badge diff-int">Intermediate</span></td>
+                        <td class="stat-block">
+                            <div class="primary">3 recordings</div>
+                            <div class="secondary">412 dl · 87 likes</div>
+                        </td>
+                        <td><button class="like on row-btn"><span class="heart">♥</span> Liked</button></td>
+                        <td>
+                            <div class="dl-stack">
+                                <button class="row-btn accent">Download</button>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <!-- Row 2 — collapsed snippet, ALSO OWNED BY
+                         THE CURRENT USER. The author meta-line shows
+                         a "Your upload" badge + a small inline
+                         Delete link-button. Hidden for rows the
+                         user doesn't own. -->
+                    <tr>
+                        <td>
+                            <div class="name-row">
+                                <span class="expand-caret" title="Expand">▸</span>
+                                <div class="name-body">
+                                    <div class="name-line">d/f+2 punish lab — full screen check</div>
+                                    <div class="meta-line">
+                                        <span>by Komugi</span>
+                                        <span class="owner-badge">Your upload</span>
+                                        <span class="meta-tag">#punishment</span>
+                                    </div>
+                                    <div class="desc snippet">Quick reps for punishing whiffed d/f+2 from sweep, mid, and full screen. Use this to drill the muscle memory for jabbing in vs. ducking and launching when their move is recoverable.</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            <div class="char-line">jin (p2)</div>
+                            <div class="version-line">v3.00.02</div>
+                        </td>
+                        <td><span class="diff-badge diff-beg">Beginner</span></td>
+                        <td class="stat-block">
+                            <div class="primary">1 recording</div>
+                            <div class="secondary">298 dl · 54 likes</div>
+                        </td>
+                        <td><button class="like row-btn"><span class="heart">♡</span> Like</button></td>
+                        <!-- Owner-only Delete tucks under Download in the
+                             same column. Two stacked buttons fit cleanly
+                             into the cell next to the description block,
+                             and the action is co-located with Download
+                             instead of buried in the meta-line. -->
+                        <td>
+                            <div class="dl-stack">
+                                <button class="row-btn accent">Download</button>
+                                <button class="row-btn destructive"
+                                        data-confirm-delete="cloud"
+                                        data-name="d/f+2 punish lab — full screen check">Delete</button>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td>
+                            <div class="name-row">
+                                <span class="expand-caret" title="Expand">▸</span>
+                                <div class="name-body">
+                                    <div class="name-line">hwoarang flamingo mixup — 50/50 fuzzy training</div>
+                                    <div class="meta-line">
+                                        <span>by JustFrameJames</span>
+                                        <span class="meta-tag">#fuzzy_guard</span>
+                                        <span class="meta-tag">#reaction</span>
+                                    </div>
+                                    <div class="desc snippet">Set 1 is the flamingo mid mixup loop, set 2 is the low option, set 3 is the throw. Hard read trainer — don't peek at the input until you've reacted.</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            <div class="char-line">jin (p2)</div>
+                            <div class="version-line mismatch">v2.10.01 ⚠</div>
+                        </td>
+                        <td><span class="diff-badge diff-adv">Advanced</span></td>
+                        <td class="stat-block">
+                            <div class="primary">5 recordings</div>
+                            <div class="secondary">186 dl · 41 likes</div>
+                        </td>
+                        <td><button class="like row-btn"><span class="heart">♡</span> Like</button></td>
+                        <td>
+                            <div class="dl-stack">
+                                <button class="row-btn accent">Download</button>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <!-- Row 4 — fully empty taxonomy. No tags,
+                         no difficulty, no description. The caret
+                         is hidden (nothing to expand); the desc
+                         block stays present so all rows have a
+                         consistent height, but reads as a faint
+                         italic "No description." placeholder. -->
+                    <tr>
+                        <td>
+                            <div class="name-row">
+                                <span class="expand-caret" style="visibility: hidden;">▸</span>
+                                <div class="name-body">
+                                    <div class="name-line">low parry option select — beginner pack</div>
+                                    <div class="meta-line">
+                                        <span>by Komugi</span>
+                                    </div>
+                                    <div class="desc missing">No description.</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            <div class="char-line">jin (p1)</div>
+                            <div class="version-line">v3.00.02</div>
+                        </td>
+                        <td><span class="label-dim">—</span></td>
+                        <td class="stat-block">
+                            <div class="primary">4 recordings</div>
+                            <div class="secondary">95 dl · 22 likes</div>
+                        </td>
+                        <td><button class="like on row-btn"><span class="heart">♥</span> Liked</button></td>
+                        <td>
+                            <div class="dl-stack">
+                                <button class="row-btn accent">Download</button>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td>
+                            <div class="name-row">
+                                <span class="expand-caret" title="Expand">▸</span>
+                                <div class="name-body">
+                                    <div class="name-line">throw break — Jin command grab + i14 routine</div>
+                                    <div class="meta-line">
+                                        <span class="label-dim">anonymous</span>
+                                        <span class="meta-tag">#throw_break</span>
+                                    </div>
+                                    <div class="desc snippet">CPU alternates left-hand and right-hand throws plus a fake-out i14 launcher. Tap 1 or 2 as soon as the throw animation kicks in; eat the launcher if you guess wrong on the throw.</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            <div class="char-line">jin (p2)</div>
+                            <div class="version-line">v3.00.02</div>
+                        </td>
+                        <td><span class="diff-badge diff-int">Intermediate</span></td>
+                        <td class="stat-block">
+                            <div class="primary">2 recordings</div>
+                            <div class="secondary">71 dl · 18 likes</div>
+                        </td>
+                        <td><button class="like row-btn"><span class="heart">♡</span> Like</button></td>
+                        <td>
+                            <div class="dl-stack">
+                                <button class="row-btn accent">Download</button>
+                            </div>
+                        </td>
+                    </tr>
+
+                </tbody>
+            </table>
+
+            <div class="pagination">
+                <button>&lt; Prev</button>
+                <button>Next &gt;</button>
+                <span class="page-indicator">Page 1 of 9</span>
+            </div>
+
+            <div class="footer-help">
+                Downloaded drills land in <code>opendojo/</code> alongside your local ones —
+                use the Drills tab to load them.
+            </div>
+        </div>
+
+        <!-- =====================================================
+             EXPORT TAB — capture current slots + share/upload
+             ===================================================== -->
+        <div class="tab-pane" id="pane-export">
+            <!-- Status line at the top: practice state + character
+                 detection + populated slot count right-aligned. -->
+            <div class="row">
+                <span class="label-inline">Status:</span>
+                <span class="status-pill status-good">Jin (CPU on p2)</span>
+                <span class="right-info">5/8 recordings</span>
+            </div>
+
+            <hr class="sep">
+
+            <table class="results" style="margin-bottom: 6px;">
+                <colgroup>
+                    <col class="r-name">
+                    <col class="r-kind">
+                    <col class="r-detail">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>Recording</th>
+                        <th>Kind</th>
+                        <th>Detail</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>Recording 1</td><td>Live</td><td>14 events</td></tr>
+                    <tr><td>Recording 2</td><td>Live</td><td>21 events</td></tr>
+                    <tr><td>Recording 3</td><td>Move List</td><td>saved</td></tr>
+                    <tr><td>Recording 4</td><td>Live</td><td>8 events</td></tr>
+                    <tr><td>Recording 5</td><td>Live</td><td>12 events</td></tr>
+                </tbody>
+            </table>
+
+            <hr class="sep">
+
+            <div class="section-head">Export</div>
+
+            <div class="form-row">
+                <div class="label">Name</div>
+                <div class="control">
+                    <input type="text" class="full" value="">
+                    <div class="help">Leave blank for an auto timestamp.</div>
+                </div>
+            </div>
+
+            <div class="form-row full">
+                <div class="label">Description (optional)</div>
+                <div class="control">
+                    <textarea rows="4" placeholder="Notes for whoever uses this drill — what to expect, frame data, character matchup, anything else useful."></textarea>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="label"></div>
+                <div class="control">
+                    <button class="accent">Export</button>
+                    <span class="label-dim" style="margin-left: 10px;">Writes a <code>.drill.txt</code> to <code>opendojo/</code>.</span>
+                </div>
+            </div>
+
+            <hr class="sep">
+
+            <div class="section-head">Share</div>
+
+            <div class="form-row">
+                <div class="label">Tags (optional)</div>
+                <div class="control">
+                    <span class="chip active">Reaction</span>
+                    <span class="chip">Option Select</span>
+                    <span class="chip">Fuzzy Guard</span>
+                    <span class="chip active">Punishment</span>
+                    <span class="chip">Throw Break</span>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="label">Difficulty (optional)</div>
+                <div class="control">
+                    <select style="width: 200px;">
+                        <option>(none)</option>
+                        <option>Beginner</option>
+                        <option selected>Intermediate</option>
+                        <option>Advanced</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="label"></div>
+                <div class="control">
+                    <button class="accent">Upload to OpenDojo Cloud</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- =====================================================
+             SETTINGS TAB — autosave, binds, cloud handle
+             ===================================================== -->
+        <div class="tab-pane" id="pane-settings">
+            <div class="section-title">Persisted to <code>opendojo/config.json</code></div>
+
+            <hr class="sep">
+
+            <div class="section-head">Autosave</div>
+            <label><input type="checkbox" checked> Autosave / autoload per character</label>
+
+            <hr class="sep">
+
+            <div class="section-head">Menu open binds</div>
+
+            <div class="bind-grid">
+                <div class="bind-cell">
+                    <div class="heading">Keyboard</div>
+                    <div>Current: <span class="current">F12</span></div>
+                    <button class="small">Rebind...</button>
+                    <button class="small">Reset</button>
+                </div>
+                <div class="bind-cell">
+                    <div class="heading">Controller</div>
+                    <div>Current: <span class="current">Back + Y</span></div>
+                    <button class="small">Rebind...</button>
+                    <button class="small">Reset</button>
+                </div>
+            </div>
+
+            <hr class="sep">
+
+            <!-- Cloud-related preferences. Handle is the new bit. -->
+            <div class="section-head">OpenDojo Cloud</div>
+
+            <div class="form-row">
+                <div class="label">Author handle</div>
+                <div class="control">
+                    <input type="text" class="full" value="Komugi" style="width: 280px;">
+                    <button class="small">Save</button>
+                    <button class="small">Reset to Steam</button>
+                    <button class="small">Clear</button>
+                    <div class="help">Stamped on drills you upload.</div>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="label"></div>
+                <div class="control">
+                    <div>Uploading as: <span style="color: var(--green); font-weight: 500;">Komugi</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- =====================================================
+             ABOUT TAB
+             ===================================================== -->
+        <div class="tab-pane" id="pane-about">
+            <div>
+                <strong>OpenDojo v0.1</strong> — Tekken 8 practice-mode drill tool
+            </div>
+            <p style="line-height: 1.5; max-width: 720px;">
+                Save and share practice-mode recordings as text drill files.
+                Each drill contains one or more recordings; loading places them
+                into the in-game recording slots.
+            </p>
+
+            <hr class="sep">
+
+            <div>
+                Toggle this menu: <span style="color: var(--green); font-weight: 500;">F12</span>
+                or <span style="color: var(--green); font-weight: 500;">Back + Y</span>
+                <span class="label-dim">(both rebindable)</span>
+            </div>
+
+            <div class="footer-help">
+                Drill files + config live in <code>opendojo/</code> next to the game executable.
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- Confirmation modal — shared between Drills "Delete" and Browse
+     owner-delete. The contextual copy (e.g. "Other players will no
+     longer see it") flips based on whether the trigger came from a
+     local or cloud drill. -->
+<div class="modal-backdrop" id="confirm-modal">
+    <div class="modal">
+        <h3>Delete this drill?</h3>
+        <div class="target" id="confirm-name">drill_name_here</div>
+        <div class="body" id="confirm-body">
+            This will permanently delete the drill file. This action can't be undone.
+        </div>
+        <div class="actions">
+            <button data-modal="cancel">Cancel</button>
+            <button class="destructive" data-modal="confirm">Delete</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// Tiny tab-switcher. The real menu uses ImGui's BeginTabBar /
+// BeginTabItem; here we toggle classes. Keeping JS dependency-free
+// so the file works opened straight from disk.
+document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+        const target = t.dataset.tab;
+        document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+        document.querySelectorAll('.tab-pane').forEach(p => {
+            p.classList.toggle('visible', p.id === 'pane-' + target);
+        });
+        const label = t.textContent.trim();
+        document.getElementById('titlebar-text').textContent = 'OpenDojo v0.1 — ' + label;
+    });
+});
+
+// Expand carets in the Browse tab toggle the description on
+// their row. Pure cosmetic in the mockup — no AJAX, no data.
+document.querySelectorAll('#pane-browse .expand-caret').forEach(c => {
+    c.addEventListener('click', () => {
+        const body = c.parentElement.querySelector('.name-body');
+        const desc = body.querySelector('.desc');
+        if (!desc) return;  // empty-description row
+        if (desc.classList.contains('expanded')) {
+            desc.classList.remove('expanded');
+            desc.classList.add('snippet');
+            c.textContent = '▸';
+        } else {
+            desc.classList.remove('snippet');
+            desc.classList.add('expanded');
+            c.textContent = '▾';
+        }
+    });
+});
+
+// Delete-confirmation modal.
+//   * Local trigger ([data-confirm-delete="local"]): file in
+//     opendojo/ gets removed. Phrasing reflects local-only impact.
+//   * Cloud trigger ([data-confirm-delete="cloud"]): server hard-
+//     delete via delete_my_drill RPC. Phrasing reflects that other
+//     players will lose access.
+const modal     = document.getElementById('confirm-modal');
+const modalName = document.getElementById('confirm-name');
+const modalBody = document.getElementById('confirm-body');
+let   pendingRow = null;
+
+const LOCAL_COPY =
+    "This removes the .drill.txt from your opendojo/ folder. Other " +
+    "people's copies are unaffected. This can't be undone.";
+const CLOUD_COPY =
+    "Other players will lose access immediately. Their likes and " +
+    "downloads are removed too. This can't be undone.";
+
+document.querySelectorAll('[data-confirm-delete]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        const kind = btn.dataset.confirmDelete;
+        const name = btn.dataset.name || '(unnamed drill)';
+        modalName.textContent = name;
+        modalBody.textContent = (kind === 'cloud') ? CLOUD_COPY : LOCAL_COPY;
+        pendingRow = btn.closest('tr') || btn.closest('.autosave-row');
+        modal.classList.add('visible');
+    });
+});
+
+modal.querySelector('[data-modal="cancel"]').addEventListener('click', () => {
+    modal.classList.remove('visible');
+    pendingRow = null;
+});
+modal.querySelector('[data-modal="confirm"]').addEventListener('click', () => {
+    // Mockup behavior: fade the row out so the click feels real.
+    if (pendingRow) {
+        pendingRow.style.transition = 'opacity 200ms';
+        pendingRow.style.opacity = '0.35';
+    }
+    modal.classList.remove('visible');
+    pendingRow = null;
+});
+modal.addEventListener('click', (e) => {
+    if (e.target === modal) {  // backdrop click
+        modal.classList.remove('visible');
+        pendingRow = null;
+    }
+});
+</script>
+
+<!-- ================================================================
+     Delete UX (this revision):
+
+     - Drills tab: each row gets a third action button "Delete" in
+       the Actions cell. Hot-tinted (destructive) so a misclick
+       feels different from Add/Replace. Click → shared modal with
+       local-flavored copy: "removes the .drill.txt from your
+       opendojo/ folder. Other people's copies are unaffected."
+       Autosave rows in the Auto-saves block get a matching Delete
+       button on the right.
+
+     - Browse tab: when the row's uploader_id matches the calling
+       user, the author meta-line picks up a "Your upload" accent
+       badge, and the rightmost Download cell stacks a destructive
+       Delete button under the Download. Other rows are unchanged
+       (single Download button). Putting the action in the existing
+       Actions column instead of the meta-line keeps the two row
+       affordances co-located and uses the vertical space the
+       description already created. Click → same modal, cloud-
+       flavored copy: "Other players will lose access immediately.
+       Their likes and downloads are removed too."
+
+     - Shared modal: backdrop + centered card with the drill name
+       called out in accent color. Cancel + destructive Delete
+       buttons. Backdrop click cancels.
+
+     - Try it: click any Delete button in the mockup — modal
+       opens, Cancel/backdrop closes, Delete fades the row to
+       0.35 opacity to simulate the post-delete state.
+
+     ================================================================
+     Notes for the critique pass:
+
+     1. Wider menu: existing min 900px → proposed 1100px. The Browse
+        filter row is the constraint; everything else looked fine at
+        900 too.
+
+     2. Browse — character picker NEW combo replaces the "match CPU
+        only" toggle. "current CPU (Jin)" appears at the top of the
+        list as a shortcut.
+
+     3. Tags as toggle chips (Browse + Export both). Active state
+        uses the accent color.
+
+     4. Search hint reads "name, description, or author" so it's
+        clear FTS covers all three.
+
+     5. Browse Stats column collapses dl + likes into one cell.
+
+     6. Version mismatch turns red + ⚠ on the Character column.
+
+     7. Like button: empty heart / solid heart + label flip on toggle.
+
+     8. Difficulty as colored badge: green / amber / red.
+
+     9. Description: snippet by default, click the ▸ caret to expand
+        inline. Empty descriptions hide the block entirely (row 4 in
+        Browse). Expanded form has accent left-border and preserves
+        newlines.
+
+    10. All taxonomy fields (tags, difficulty, description) are
+        optional. Labels read "Tags (optional)" / "Difficulty
+        (optional)" / "Description (optional)" on the Export tab.
+        Row 4 in Browse demonstrates the all-empty case.
+
+    11. Drills tab unchanged structurally — same auto-saves block +
+        regular drills table layout we already have.
+
+    12. Settings tab gains a new "OpenDojo Cloud" section with the
+        author handle: input + Save / Reset to Steam / Clear, plus
+        a live "Uploading as: …" line and current Steam persona
+        for context.
+
+    13. About tab gains a one-line mention of the new cloud-state
+        files (handle.txt + cloud.json) so users know where to look
+        if they want to reset cloud identity.
+     ================================================================ -->
+</body>
+</html>

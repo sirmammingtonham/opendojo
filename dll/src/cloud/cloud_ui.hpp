@@ -18,4 +18,9 @@ void draw_browse_tab();
 // would have written.
 void draw_upload_export_row(bool can_export, const char* name, const char* description);
 
+// Draw the "OpenDojo Cloud" section inside the Settings tab —
+// currently just the author handle override field. Renders nothing
+// if cloud isn't configured for this build.
+void draw_settings_section();
+
 }  // namespace opendojo::cloud::ui

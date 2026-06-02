@@ -21,20 +21,27 @@ actual security boundary.
 ## Cost protections
 
 The free tier covers a real userbase, but a malicious client with the
-anon key could otherwise pull the whole table or spam uploads. The
-hardening (all enforced server-side):
+anon key could otherwise pull the whole table, spam uploads, or mint
+unlimited anonymous identities to multiply quotas. The hardening (all
+enforced server-side):
 
 - `api.max_rows = 50` in `config.toml` caps every PostgREST response.
 - `anon` and `authenticated` roles have **no direct access** to
   `drills` — only to the `drill_summaries` view (metadata) and the
   two RPC functions (read one drill, increment download counter).
 - `get_drill` rate-limits downloads to 100/day per user via the
-  `download_log` table.
+  `rate_limits` table.
 - The `submit_drill` Edge Function is the only writer. It validates
   the JWT, parses the drill text server-side, enforces a 64 KB
-  size cap + 8-recording cap, and rejects more than 5 uploads/day
-  per user via the `submission_log` table. Duplicate uploads
-  (same SHA-256 content hash) fail on the unique index.
+  size cap + 8-recording cap, and rate-limits uploads/day per user
+  via `try_record_submission`. Duplicate uploads (same SHA-256
+  content hash) are short-circuited and do not consume quota.
+- **Per-IP throttles in `[auth.rate_limit]`** cap anonymous signups
+  at 5/hour/IP. Without this an attacker could spin up identities
+  arbitrarily fast and multiply the per-user quotas.
+- WinHTTP requests `Accept-Encoding: gzip` so PostgREST responses
+  arrive compressed (~15-25% of raw), trimming the Bandwidth budget
+  on every list + download call.
 - The service-role key is only used inside the Edge Function — never
   shipped in the DLL or any client.
 

@@ -1,0 +1,970 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenDojo Cloud — admin</title>
+<style>
+/*
+ * Self-contained admin panel. Hits Supabase REST endpoints directly
+ * with the project's service_role key — that key is full read/write
+ * on the database, so this UI is exclusively for the project owner.
+ *
+ * Open this file in a browser. Most browsers permit fetch() from
+ * file:// to https origins; if yours blocks it, run a local server:
+ *   python -m http.server 8765
+ * ...then open http://localhost:8765/index.html.
+ *
+ * The URL + service_role key are held in sessionStorage so a reload
+ * doesn't kick you out — they vanish when you close the tab. Never
+ * persisted to localStorage; never sent anywhere except to your
+ * own Supabase project over HTTPS.
+ */
+:root {
+    --bg:         #15151a;
+    --bg-2:       #1c1c24;
+    --bg-3:       #232331;
+    --border:     #2e2e3c;
+    --text:       #e1e1ea;
+    --dim:        #7a7a8c;
+    --accent:     #4a9eff;
+    --accent-soft:#8cc3ff;
+    --green:      #7af0a0;
+    --amber:      #ffd966;
+    --red:        #ff8c66;
+    --bg-row:     #1a1a22;
+    --bg-row-alt: #1d1d27;
+}
+
+* { box-sizing: border-box; }
+html, body {
+    margin: 0; padding: 0;
+    background: #0d0d11; color: var(--text);
+    font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+    font-size: 14px; line-height: 1.45;
+}
+
+header {
+    padding: 16px 24px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+}
+header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+header .status { font-size: 13px; color: var(--dim); }
+header .status.ok { color: var(--green); }
+header .status.bad { color: var(--red); }
+
+main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px 24px 80px;
+}
+
+section { margin-bottom: 32px; }
+section h2 {
+    margin: 0 0 12px;
+    font-size: 15px; font-weight: 600;
+    color: var(--accent-soft);
+}
+section p { margin: 0 0 12px; color: var(--dim); font-size: 13px; }
+
+.card {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 16px;
+}
+
+input, textarea, select {
+    background: var(--bg-3);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    border-radius: 2px;
+    font: inherit;
+}
+input:focus, textarea:focus, select:focus {
+    outline: 1px solid var(--accent);
+    border-color: var(--accent);
+}
+textarea { width: 100%; min-height: 80px; font-family: ui-monospace, Consolas, monospace; }
+
+button {
+    background: var(--bg-3);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 14px;
+    border-radius: 2px;
+    cursor: pointer;
+    font: inherit;
+}
+button:hover { background: #2c2c3c; }
+button.primary { background: #2d4d7a; border-color: #3a6fb0; }
+button.primary:hover { background: #3a6fb0; }
+button.destructive {
+    background: rgba(255,90,90,.10);
+    border-color: rgba(255,90,90,.35);
+    color: #ffb0a3;
+}
+button.destructive:hover { background: rgba(255,90,90,.20); }
+button[disabled] { opacity: 0.4; cursor: not-allowed; }
+
+.tabs {
+    display: flex; gap: 2px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+}
+.tab {
+    padding: 10px 18px;
+    color: var(--dim);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    user-select: none;
+}
+.tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+}
+
+.tab-pane { display: none; }
+.tab-pane.visible { display: block; }
+
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.row + .row { margin-top: 10px; }
+.col { display: flex; flex-direction: column; gap: 6px; }
+.col label { font-size: 12px; color: var(--dim); }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+th, td {
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    padding: 8px 10px;
+    vertical-align: top;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+thead th {
+    background: #18181f; color: var(--dim);
+    font-weight: 500; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+}
+tbody tr:nth-child(odd)  { background: var(--bg-row); }
+tbody tr:nth-child(even) { background: var(--bg-row-alt); }
+tbody tr:hover           { background: #26263a; }
+td.wrap { white-space: normal; }
+td .actions { display: flex; gap: 4px; flex-wrap: wrap; }
+td .actions button { padding: 3px 8px; font-size: 12px; }
+
+code, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+.uuid { color: var(--dim); }
+
+.badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+}
+.badge.public   { background: rgba(122,240,160,.14); color: var(--green); }
+.badge.flagged  { background: rgba(255,217,102,.14); color: var(--amber); }
+.badge.removed  { background: rgba(255,140,102,.14); color: var(--red);   }
+
+.toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--bg-2); border: 1px solid var(--border);
+    padding: 12px 16px; border-radius: 4px;
+    max-width: 360px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.4);
+}
+.toast.ok  { border-left: 3px solid var(--green); }
+.toast.err { border-left: 3px solid var(--red); }
+
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.stat-card {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 14px 16px;
+}
+.stat-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-value { font-size: 22px; margin-top: 6px; }
+
+.drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 6px;
+    padding: 30px;
+    text-align: center;
+    color: var(--dim);
+    cursor: pointer;
+}
+.drop-zone.drag { border-color: var(--accent); background: rgba(74,158,255,.06); color: var(--accent-soft); }
+.drop-zone strong { color: var(--text); }
+
+.modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(8,8,12,.7);
+    display: none;
+    align-items: center; justify-content: center;
+}
+.modal-backdrop.visible { display: flex; }
+.modal {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 18px 20px;
+    border-radius: 4px;
+    max-width: 720px;
+    max-height: 85vh;
+    width: 90vw;
+    display: flex; flex-direction: column;
+}
+.modal h3 { margin: 0 0 10px; font-size: 15px; }
+.modal pre {
+    flex: 1;
+    overflow: auto;
+    background: #0e0e14;
+    padding: 12px;
+    border-radius: 3px;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>OpenDojo Cloud — admin</h1>
+    <span id="conn-status" class="status">disconnected</span>
+</header>
+
+<main>
+    <!-- ===================== CONFIG ===================== -->
+    <section id="config-section">
+        <h2>Connect</h2>
+        <p>
+            Paste your Supabase URL + <code>service_role</code> key. Both stay in
+            this tab's <code>sessionStorage</code> only — closing the tab wipes them.
+            The service_role key has full DB access; do not share or check this URL anywhere.
+        </p>
+        <div class="card">
+            <div class="row">
+                <div class="col" style="flex: 1;">
+                    <label>Supabase URL</label>
+                    <input id="cfg-url" type="text" placeholder="https://<ref>.supabase.co">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col" style="flex: 1;">
+                    <label>Service role key</label>
+                    <input id="cfg-key" type="password" placeholder="eyJhbGciOi...">
+                </div>
+            </div>
+            <div class="row">
+                <button class="primary" id="cfg-connect">Connect</button>
+                <button id="cfg-clear">Forget keys</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===================== STATS ====================== -->
+    <section id="stats-section" style="display: none;">
+        <h2>Overview</h2>
+        <div class="stats">
+            <div class="stat-card"><div class="stat-label">Drills (public)</div><div class="stat-value" id="stat-drills">—</div></div>
+            <div class="stat-card"><div class="stat-label">Drills (flagged)</div><div class="stat-value" id="stat-flagged">—</div></div>
+            <div class="stat-card"><div class="stat-label">Reports (24h)</div><div class="stat-value" id="stat-reports-24h">—</div></div>
+            <div class="stat-card"><div class="stat-label">Banned users</div><div class="stat-value" id="stat-bans">—</div></div>
+        </div>
+    </section>
+
+    <!-- ===================== TABS ======================= -->
+    <section id="content-section" style="display: none;">
+        <div class="tabs">
+            <div class="tab active" data-tab="drills">Drills</div>
+            <div class="tab" data-tab="bans">Bans</div>
+            <div class="tab" data-tab="upload">Bulk upload</div>
+        </div>
+
+        <!-- DRILLS ------------------------------------------------ -->
+        <div class="tab-pane visible" id="pane-drills">
+            <div class="row" style="margin-bottom: 14px;">
+                <input id="drills-search" type="text" placeholder="Search (name/character/author)…" style="flex: 1; min-width: 240px;">
+                <select id="drills-status">
+                    <option value="any" selected>Any status</option>
+                    <option value="public">Public only</option>
+                    <option value="flagged">Flagged only</option>
+                    <option value="removed">Removed only</option>
+                </select>
+                <select id="drills-sort">
+                    <option value="created_at.desc" selected>Newest</option>
+                    <option value="reports.desc">Most reported</option>
+                    <option value="downloads.desc">Most downloaded</option>
+                    <option value="likes.desc">Most liked</option>
+                </select>
+                <button id="drills-refresh">Refresh</button>
+            </div>
+
+            <table>
+                <colgroup>
+                    <col style="width: 26%">
+                    <col style="width: 12%">
+                    <col style="width: 9%">
+                    <col style="width: 8%">
+                    <col style="width: 14%">
+                    <col style="width: 10%">
+                    <col style="width: 21%">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th><input type="checkbox" id="drills-select-all"> Name</th>
+                        <th>Character</th>
+                        <th>Status</th>
+                        <th>Reports</th>
+                        <th>Author</th>
+                        <th>Stats</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="drills-tbody"></tbody>
+            </table>
+
+            <div class="row" style="margin-top: 14px;">
+                <button id="drills-prev">&lt; Prev</button>
+                <button id="drills-next">Next &gt;</button>
+                <span id="drills-page" style="color: var(--dim);"></span>
+                <span style="flex: 1;"></span>
+                <span id="drills-selected-count" style="color: var(--dim);"></span>
+                <button class="destructive" id="drills-bulk-delete">Bulk delete selected</button>
+                <button id="drills-bulk-flag">Bulk flag selected</button>
+            </div>
+        </div>
+
+        <!-- BANS -------------------------------------------------- -->
+        <div class="tab-pane" id="pane-bans">
+            <div class="card" style="margin-bottom: 16px;">
+                <h2 style="margin-top:0;">Add ban</h2>
+                <p>
+                    Paste a user UUID (you can find it on any drill row above, under "Author").
+                    Banned users can still browse but their <code>submit_drill</code> calls return 403.
+                </p>
+                <div class="row">
+                    <input id="ban-user-id" type="text" placeholder="00000000-0000-0000-0000-000000000000" style="flex: 1; min-width: 320px;" class="mono">
+                    <input id="ban-reason" type="text" placeholder="reason (optional, for your records)" style="flex: 2;">
+                    <button class="destructive" id="ban-add">Add ban</button>
+                </div>
+            </div>
+
+            <h2>Active bans</h2>
+            <table>
+                <colgroup>
+                    <col style="width: 40%">
+                    <col style="width: 35%">
+                    <col style="width: 15%">
+                    <col style="width: 10%">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>User ID</th>
+                        <th>Reason</th>
+                        <th>When</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="bans-tbody"></tbody>
+            </table>
+        </div>
+
+        <!-- BULK UPLOAD ------------------------------------------- -->
+        <div class="tab-pane" id="pane-upload">
+            <p>
+                Drag <code>.drill.txt</code> files onto the area below (or click to choose).
+                We parse each file's header for name / character / cpu_side / recordings count,
+                let you review the table, then insert them as <code>service_role</code> writes —
+                bypassing per-user rate limits but still subject to the unique-content-hash
+                constraint (duplicate files won't double-insert).
+            </p>
+            <div class="drop-zone" id="drop-zone">
+                <strong>Drop drill files here</strong> or click to browse.
+                <input type="file" id="drop-input" multiple accept=".txt,.drill,.drill.txt" style="display:none;">
+            </div>
+            <table id="upload-table" style="display: none; margin-top: 14px;">
+                <colgroup>
+                    <col style="width: 25%">
+                    <col style="width: 15%">
+                    <col style="width: 12%">
+                    <col style="width: 10%">
+                    <col style="width: 28%">
+                    <col style="width: 10%">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>Name (editable)</th>
+                        <th>Character</th>
+                        <th>Side</th>
+                        <th>Recordings</th>
+                        <th>Author handle (optional)</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="upload-tbody"></tbody>
+            </table>
+            <div class="row" id="upload-actions" style="display:none; margin-top: 14px;">
+                <button class="primary" id="upload-submit">Submit all</button>
+                <button id="upload-clear">Clear</button>
+                <span id="upload-progress" style="color: var(--dim);"></span>
+            </div>
+        </div>
+    </section>
+</main>
+
+<!-- Drill content viewer modal -->
+<div class="modal-backdrop" id="viewer">
+    <div class="modal">
+        <h3 id="viewer-title">Drill content</h3>
+        <pre id="viewer-body"></pre>
+        <div class="actions">
+            <button id="viewer-close">Close</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// ====================================================================
+// Shared state + config persistence (sessionStorage only).
+// ====================================================================
+const SS_URL = 'opendojo_admin_url';
+const SS_KEY = 'opendojo_admin_key';
+let baseUrl = sessionStorage.getItem(SS_URL) || '';
+let svcKey  = sessionStorage.getItem(SS_KEY) || '';
+
+const PAGE_SIZE = 50;
+let drillsPage = 0;
+let drillsCache = [];
+
+function setStatus(msg, kind) {
+    const el = document.getElementById('conn-status');
+    el.textContent = msg;
+    el.className = 'status ' + (kind || '');
+}
+
+function toast(msg, ok) {
+    const t = document.createElement('div');
+    t.className = 'toast ' + (ok === false ? 'err' : 'ok');
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 3500);
+}
+
+// ====================================================================
+// Supabase REST helpers. service_role key bypasses RLS, so anything
+// in the DB is reachable from here.
+// ====================================================================
+function headers(extra) {
+    return Object.assign({
+        'apikey': svcKey,
+        'Authorization': 'Bearer ' + svcKey,
+        'Content-Type': 'application/json',
+    }, extra || {});
+}
+
+async function supa(path, opts = {}) {
+    const r = await fetch(baseUrl + path, Object.assign({
+        headers: headers(opts.headers),
+    }, opts));
+    if (!r.ok) {
+        const body = await r.text();
+        throw new Error(`${r.status}: ${body}`);
+    }
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+        const text = await r.text();
+        return text ? JSON.parse(text) : null;
+    }
+    return await r.text();
+}
+
+// Specialized: PostgREST counts via Prefer: count=exact + parsed Range header.
+async function supaCount(path) {
+    const r = await fetch(baseUrl + path, {
+        method: 'HEAD',
+        headers: headers({ 'Prefer': 'count=exact', 'Range-Unit': 'items', 'Range': '0-0' }),
+    });
+    if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+    const cr = r.headers.get('content-range');  // e.g. "0-0/42"
+    if (!cr) return 0;
+    const total = cr.split('/')[1];
+    return total === '*' ? 0 : parseInt(total, 10);
+}
+
+// ====================================================================
+// Connect flow.
+// ====================================================================
+async function tryConnect() {
+    if (!baseUrl || !svcKey) {
+        setStatus('disconnected', 'bad');
+        return false;
+    }
+    setStatus('connecting…');
+    try {
+        // Smoke test: count drills. If RLS denied or auth bad, this errors.
+        const n = await supaCount('/rest/v1/drills?select=id');
+        setStatus(`connected (${n} drills)`, 'ok');
+        document.getElementById('stats-section').style.display = '';
+        document.getElementById('content-section').style.display = '';
+        await refreshAll();
+        return true;
+    } catch (e) {
+        setStatus('connection failed', 'bad');
+        toast(e.message, false);
+        return false;
+    }
+}
+
+document.getElementById('cfg-connect').addEventListener('click', async () => {
+    baseUrl = document.getElementById('cfg-url').value.trim().replace(/\/$/, '');
+    svcKey = document.getElementById('cfg-key').value.trim();
+    if (!baseUrl || !svcKey) { toast('URL and key required', false); return; }
+    sessionStorage.setItem(SS_URL, baseUrl);
+    sessionStorage.setItem(SS_KEY, svcKey);
+    await tryConnect();
+});
+
+document.getElementById('cfg-clear').addEventListener('click', () => {
+    sessionStorage.removeItem(SS_URL);
+    sessionStorage.removeItem(SS_KEY);
+    baseUrl = ''; svcKey = '';
+    document.getElementById('cfg-url').value = '';
+    document.getElementById('cfg-key').value = '';
+    setStatus('disconnected');
+    document.getElementById('stats-section').style.display = 'none';
+    document.getElementById('content-section').style.display = 'none';
+});
+
+// Restore cached creds on first load.
+if (baseUrl) document.getElementById('cfg-url').value = baseUrl;
+if (svcKey)  document.getElementById('cfg-key').value = svcKey;
+if (baseUrl && svcKey) tryConnect();
+
+// ====================================================================
+// Stats refresh.
+// ====================================================================
+async function refreshStats() {
+    try {
+        const dayStart = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+        const [drills, flagged, bans, reports24h] = await Promise.all([
+            supaCount('/rest/v1/drills?status=eq.public&select=id'),
+            supaCount('/rest/v1/drills?status=eq.flagged&select=id'),
+            supaCount('/rest/v1/user_bans?select=user_id'),
+            supaCount(`/rest/v1/drill_reports?created_at=gte.${dayStart}&select=drill_id`),
+        ]);
+        document.getElementById('stat-drills').textContent = drills;
+        document.getElementById('stat-flagged').textContent = flagged;
+        document.getElementById('stat-bans').textContent = bans;
+        document.getElementById('stat-reports-24h').textContent = reports24h;
+    } catch (e) {
+        toast('stats: ' + e.message, false);
+    }
+}
+
+// ====================================================================
+// Drills tab: list / status / delete / view content.
+// ====================================================================
+async function refreshDrills() {
+    const status = document.getElementById('drills-status').value;
+    const search = document.getElementById('drills-search').value.trim();
+    const sort   = document.getElementById('drills-sort').value;
+    let q = '/rest/v1/drills?select=id,name,description,character,cpu_side,status,uploader_id,author_handle,downloads,likes,reports,size_bytes,recordings_count,created_at';
+    if (status !== 'any') q += `&status=eq.${status}`;
+    if (search) {
+        q += `&search_tsv=fts(simple).${encodeURIComponent(search + ':*')}`;
+    }
+    q += `&order=${sort}&limit=${PAGE_SIZE}&offset=${drillsPage * PAGE_SIZE}`;
+    try {
+        const rows = await supa(q);
+        drillsCache = rows;
+        renderDrills(rows);
+    } catch (e) {
+        toast('drills: ' + e.message, false);
+    }
+}
+
+function renderDrills(rows) {
+    const tb = document.getElementById('drills-tbody');
+    tb.innerHTML = '';
+    for (const d of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td class="wrap">
+                <input type="checkbox" class="row-select" data-id="${d.id}">
+                <strong>${escapeHtml(d.name)}</strong>
+                ${d.description ? `<div style="font-size:12px;color:var(--dim);">${escapeHtml(d.description.slice(0, 140))}${d.description.length > 140 ? '…' : ''}</div>` : ''}
+            </td>
+            <td>${escapeHtml(d.character)}${d.cpu_side ? ` <span style="color:var(--dim)">(${d.cpu_side})</span>` : ''}</td>
+            <td><span class="badge ${d.status}">${d.status}</span></td>
+            <td>
+                ${d.reports > 0
+                    ? `<button data-action="view-reports" data-id="${d.id}" data-name="${escapeHtml(d.name)}" style="background:rgba(255,217,102,.12);border-color:rgba(255,217,102,.35);color:var(--amber);">${d.reports}</button>`
+                    : '<span style="color:var(--dim)">0</span>'}
+            </td>
+            <td>
+                ${d.author_handle ? `<div>${escapeHtml(d.author_handle)}</div>` : '<div style="color:var(--dim)">anonymous</div>'}
+                <div class="uuid mono" style="font-size:11px;">${d.uploader_id || '—'}</div>
+            </td>
+            <td>${d.recordings_count} rec<br>
+                <span style="color:var(--dim);font-size:12px;">${d.downloads} dl · ${d.likes} likes</span>
+            </td>
+            <td>
+                <div class="actions">
+                    <button data-action="view" data-id="${d.id}">View</button>
+                    <button data-action="public" data-id="${d.id}">Public</button>
+                    <button data-action="flagged" data-id="${d.id}">Flag</button>
+                    <button data-action="removed" data-id="${d.id}">Hide</button>
+                    <button class="destructive" data-action="delete" data-id="${d.id}">Delete</button>
+                    ${d.uploader_id ? `<button class="destructive" data-action="ban" data-uploader="${d.uploader_id}">Ban</button>` : ''}
+                </div>
+            </td>`;
+        tb.appendChild(tr);
+    }
+    document.getElementById('drills-page').textContent =
+        `Page ${drillsPage + 1}${rows.length < PAGE_SIZE ? ' (last)' : ''}`;
+    updateSelectedCount();
+}
+
+function escapeHtml(s) {
+    return String(s ?? '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+document.getElementById('drills-tbody').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const action = btn.dataset.action;
+    if (action === 'view') {
+        await viewDrill(id);
+    } else if (action === 'view-reports') {
+        await viewReports(id, btn.dataset.name);
+    } else if (action === 'public' || action === 'flagged' || action === 'removed') {
+        await setDrillStatus(id, action);
+    } else if (action === 'delete') {
+        if (confirm('Delete this drill permanently?')) await deleteDrill(id);
+    } else if (action === 'ban') {
+        const uploader = btn.dataset.uploader;
+        const reason = prompt('Ban reason (shown only to you):', '');
+        if (reason !== null) await addBan(uploader, reason || null);
+    }
+});
+
+async function viewReports(drillId, drillName) {
+    try {
+        const rows = await supa(
+            `/rest/v1/drill_reports?drill_id=eq.${drillId}&select=user_id,reason,created_at&order=created_at.desc`);
+        const lines = rows.map(r => {
+            const when = new Date(r.created_at).toLocaleString();
+            const who = r.user_id;
+            const why = r.reason ? r.reason : '(no reason given)';
+            return `${when}\n  by ${who}\n  ${why}`;
+        });
+        document.getElementById('viewer-title').textContent = `Reports for: ${drillName}`;
+        document.getElementById('viewer-body').textContent =
+            rows.length ? lines.join('\n\n') : '(no reports — counter may be stale)';
+        document.getElementById('viewer').classList.add('visible');
+    } catch (e) { toast(e.message, false); }
+}
+
+document.getElementById('drills-tbody').addEventListener('change', (e) => {
+    if (e.target.classList.contains('row-select')) updateSelectedCount();
+});
+
+document.getElementById('drills-select-all').addEventListener('change', (e) => {
+    document.querySelectorAll('.row-select').forEach(cb => cb.checked = e.target.checked);
+    updateSelectedCount();
+});
+
+function selectedIds() {
+    return Array.from(document.querySelectorAll('.row-select:checked')).map(cb => cb.dataset.id);
+}
+function updateSelectedCount() {
+    const n = selectedIds().length;
+    document.getElementById('drills-selected-count').textContent = n ? `${n} selected` : '';
+}
+
+async function viewDrill(id) {
+    try {
+        const [row] = await supa(`/rest/v1/drills?id=eq.${id}&select=name,content`);
+        document.getElementById('viewer-title').textContent = row.name;
+        document.getElementById('viewer-body').textContent = row.content;
+        document.getElementById('viewer').classList.add('visible');
+    } catch (e) { toast(e.message, false); }
+}
+
+document.getElementById('viewer-close').addEventListener('click', () => {
+    document.getElementById('viewer').classList.remove('visible');
+});
+
+async function setDrillStatus(id, status) {
+    try {
+        await supa(`/rest/v1/drills?id=eq.${id}`, {
+            method: 'PATCH', body: JSON.stringify({ status }),
+        });
+        toast(`status → ${status}`);
+        await refreshDrills();
+        await refreshStats();
+    } catch (e) { toast(e.message, false); }
+}
+
+async function deleteDrill(id) {
+    try {
+        await supa(`/rest/v1/drills?id=eq.${id}`, { method: 'DELETE' });
+        toast('deleted');
+        await refreshDrills();
+        await refreshStats();
+    } catch (e) { toast(e.message, false); }
+}
+
+document.getElementById('drills-bulk-delete').addEventListener('click', async () => {
+    const ids = selectedIds();
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} drill(s) permanently?`)) return;
+    try {
+        await supa(`/rest/v1/drills?id=in.(${ids.join(',')})`, { method: 'DELETE' });
+        toast(`${ids.length} deleted`);
+        await refreshDrills(); await refreshStats();
+    } catch (e) { toast(e.message, false); }
+});
+
+document.getElementById('drills-bulk-flag').addEventListener('click', async () => {
+    const ids = selectedIds();
+    if (!ids.length) return;
+    try {
+        await supa(`/rest/v1/drills?id=in.(${ids.join(',')})`, {
+            method: 'PATCH', body: JSON.stringify({ status: 'flagged' }),
+        });
+        toast(`${ids.length} flagged`);
+        await refreshDrills(); await refreshStats();
+    } catch (e) { toast(e.message, false); }
+});
+
+document.getElementById('drills-refresh').addEventListener('click', refreshDrills);
+document.getElementById('drills-search').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { drillsPage = 0; refreshDrills(); }
+});
+document.getElementById('drills-status').addEventListener('change', () => { drillsPage = 0; refreshDrills(); });
+document.getElementById('drills-prev').addEventListener('click', () => { if (drillsPage > 0) { drillsPage--; refreshDrills(); }});
+document.getElementById('drills-next').addEventListener('click', () => { drillsPage++; refreshDrills(); });
+
+// ====================================================================
+// Bans tab.
+// ====================================================================
+async function refreshBans() {
+    try {
+        const rows = await supa('/rest/v1/user_bans?select=user_id,reason,banned_at&order=banned_at.desc');
+        const tb = document.getElementById('bans-tbody');
+        tb.innerHTML = '';
+        for (const b of rows) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td class="mono">${escapeHtml(b.user_id)}</td>
+                <td class="wrap">${escapeHtml(b.reason || '')}</td>
+                <td>${new Date(b.banned_at).toLocaleString()}</td>
+                <td>
+                    <button data-action="unban" data-id="${b.user_id}">Unban</button>
+                </td>`;
+            tb.appendChild(tr);
+        }
+    } catch (e) { toast(e.message, false); }
+}
+
+document.getElementById('bans-tbody').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action="unban"]');
+    if (!btn) return;
+    await removeBan(btn.dataset.id);
+});
+
+async function addBan(userId, reason) {
+    try {
+        await supa('/rest/v1/user_bans', {
+            method: 'POST',
+            headers: { 'Prefer': 'resolution=ignore-duplicates' },
+            body: JSON.stringify({ user_id: userId, reason }),
+        });
+        toast('banned');
+        await refreshBans(); await refreshStats();
+    } catch (e) { toast(e.message, false); }
+}
+
+async function removeBan(userId) {
+    try {
+        await supa(`/rest/v1/user_bans?user_id=eq.${userId}`, { method: 'DELETE' });
+        toast('unbanned');
+        await refreshBans(); await refreshStats();
+    } catch (e) { toast(e.message, false); }
+}
+
+document.getElementById('ban-add').addEventListener('click', () => {
+    const uid = document.getElementById('ban-user-id').value.trim();
+    const reason = document.getElementById('ban-reason').value.trim() || null;
+    if (!uid) { toast('user id required', false); return; }
+    addBan(uid, reason).then(() => {
+        document.getElementById('ban-user-id').value = '';
+        document.getElementById('ban-reason').value = '';
+    });
+});
+
+// ====================================================================
+// Bulk upload tab.
+// ====================================================================
+const uploadPending = [];  // [{ file, parsed: {name, character, cpu_side, recordings_count}, content, status }]
+
+function parseDrillHeader(content) {
+    const head = content.slice(0, 4096);
+    const get = (k) => {
+        const m = head.match(new RegExp('^\\s*' + k + ':\\s*(.+)\\s*$', 'm'));
+        return m ? m[1].trim() : '';
+    };
+    const recCount = (content.match(/^---\s*recording\s+\d+/gm) ?? []).length;
+    return {
+        name: get('name'),
+        character: get('character') || 'unknown',
+        cpu_side: get('cpu_side'),
+        recordings_count: recCount,
+    };
+}
+
+async function sha256Hex(s) {
+    const buf = new TextEncoder().encode(s);
+    const h = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function renderUploadTable() {
+    const tb = document.getElementById('upload-tbody');
+    tb.innerHTML = '';
+    for (let i = 0; i < uploadPending.length; ++i) {
+        const u = uploadPending[i];
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td><input type="text" value="${escapeHtml(u.parsed.name || u.file.name.replace(/\.drill\.txt$|\.txt$|\.drill$/, ''))}" data-i="${i}" data-field="name" style="width:100%;"></td>
+            <td>${escapeHtml(u.parsed.character)}</td>
+            <td>${escapeHtml(u.parsed.cpu_side)}</td>
+            <td>${u.parsed.recordings_count}</td>
+            <td><input type="text" placeholder="(none)" data-i="${i}" data-field="author_handle" style="width:100%;"></td>
+            <td id="upload-row-status-${i}">${u.status || 'pending'}</td>`;
+        tb.appendChild(tr);
+    }
+    document.getElementById('upload-table').style.display = uploadPending.length ? '' : 'none';
+    document.getElementById('upload-actions').style.display = uploadPending.length ? '' : 'none';
+}
+
+document.getElementById('upload-tbody').addEventListener('input', (e) => {
+    const t = e.target;
+    if (!t.dataset || t.dataset.i === undefined) return;
+    const i = +t.dataset.i;
+    if (t.dataset.field === 'name') uploadPending[i].parsed.name = t.value;
+    if (t.dataset.field === 'author_handle') uploadPending[i].author_handle = t.value;
+});
+
+const drop = document.getElementById('drop-zone');
+const dropInput = document.getElementById('drop-input');
+drop.addEventListener('click', () => dropInput.click());
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+drop.addEventListener('drop', async (e) => {
+    e.preventDefault(); drop.classList.remove('drag');
+    await handleFiles(e.dataTransfer.files);
+});
+dropInput.addEventListener('change', async (e) => { await handleFiles(e.target.files); dropInput.value = ''; });
+
+async function handleFiles(fileList) {
+    for (const f of fileList) {
+        const text = await f.text();
+        const parsed = parseDrillHeader(text);
+        if (!parsed.recordings_count || parsed.recordings_count > 8) {
+            toast(`${f.name}: doesn't look like a drill (skipping)`, false);
+            continue;
+        }
+        uploadPending.push({ file: f, content: text, parsed, author_handle: '', status: 'pending' });
+    }
+    renderUploadTable();
+}
+
+document.getElementById('upload-clear').addEventListener('click', () => {
+    uploadPending.length = 0;
+    renderUploadTable();
+});
+
+document.getElementById('upload-submit').addEventListener('click', async () => {
+    const btn = document.getElementById('upload-submit');
+    btn.disabled = true;
+    let ok = 0, fail = 0;
+    for (let i = 0; i < uploadPending.length; ++i) {
+        const u = uploadPending[i];
+        document.getElementById('upload-progress').textContent = `Uploading ${i + 1}/${uploadPending.length}…`;
+        const statusCell = document.getElementById('upload-row-status-' + i);
+        try {
+            const hash = await sha256Hex(u.content);
+            const sizeBytes = new TextEncoder().encode(u.content).byteLength;
+            const body = [{
+                name: u.parsed.name || u.file.name,
+                character: u.parsed.character,
+                cpu_side: u.parsed.cpu_side || '',
+                recordings_count: u.parsed.recordings_count,
+                content: u.content,
+                content_hash: hash,
+                size_bytes: sizeBytes,
+                author_handle: u.author_handle || null,
+                status: 'public',
+            }];
+            await supa('/rest/v1/drills', {
+                method: 'POST',
+                headers: { 'Prefer': 'resolution=ignore-duplicates,return=minimal' },
+                body: JSON.stringify(body),
+            });
+            statusCell.textContent = 'ok';
+            statusCell.style.color = 'var(--green)';
+            ++ok;
+        } catch (e) {
+            statusCell.textContent = e.message;
+            statusCell.style.color = 'var(--red)';
+            ++fail;
+        }
+    }
+    document.getElementById('upload-progress').textContent = `Done: ${ok} ok, ${fail} failed.`;
+    btn.disabled = false;
+    await refreshStats();
+});
+
+// ====================================================================
+// Tab switching.
+// ====================================================================
+document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+        document.querySelectorAll('.tab-pane').forEach(p => {
+            p.classList.toggle('visible', p.id === 'pane-' + t.dataset.tab);
+        });
+    });
+});
+
+// ====================================================================
+// Refresh-all (called after Connect).
+// ====================================================================
+async function refreshAll() {
+    drillsPage = 0;
+    await refreshStats();
+    await refreshDrills();
+    await refreshBans();
+}
+</script>
+</body>
+</html>

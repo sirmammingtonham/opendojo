@@ -27,16 +27,62 @@ create extension if not exists pgcrypto;  -- for gen_random_uuid + sha256
 -- drills
 -- =============================================================
 
+-- Allowed values for the categories array and the difficulty enum are
+-- modeled as small lookup tables. We *could* hard-code the strings in
+-- a CHECK constraint, but a table lets us tweak the menu without a
+-- migration to alter constraints. The Edge Function and the mod both
+-- validate against this set defensively.
+create table drill_categories (
+    id    text primary key,
+    label text not null  -- shown in the UI
+);
+insert into drill_categories (id, label) values
+    ('reaction',       'Reaction'),
+    ('option_select',  'Option Select'),
+    ('fuzzy_guard',    'Fuzzy Guard'),
+    ('punishment',     'Punishment'),
+    ('throw_break',    'Throw Break');
+
+create table drill_difficulties (
+    id    text primary key,
+    label text not null,
+    sort_order int not null
+);
+insert into drill_difficulties (id, label, sort_order) values
+    ('beginner',     'Beginner',     1),
+    ('intermediate', 'Intermediate', 2),
+    ('advanced',     'Advanced',     3);
+
 create table drills (
     id                uuid primary key default gen_random_uuid(),
 
     -- Human-facing fields. `name` is required; the rest are best-effort.
     name              text not null check (char_length(name) between 1 and 96),
-    description       text check (char_length(description) <= 240),
+    -- Description allows newlines and a few paragraphs. The UI uses a
+    -- multi-line input; clients are not expected to enforce the cap,
+    -- the server is.
+    description       text check (char_length(description) <= 1000),
     character         text not null check (char_length(character) between 1 and 32),
     cpu_side          text check (cpu_side in ('p1', 'p2', '')),
     recordings_count  int  not null check (recordings_count between 1 and 8),
     author_handle     text check (char_length(author_handle) <= 32),
+
+    -- Taxonomy. categories is a small array (0..5) of drill_categories.id;
+    -- difficulty is a single optional drill_difficulties.id. Validation
+    -- via subset check against the lookup tables happens in the Edge
+    -- Function; the column-level CHECKs below are belt-and-suspenders.
+    categories        text[] not null default '{}'
+                      check (
+                          array_length(categories, 1) is null
+                          or array_length(categories, 1) <= 5
+                      ),
+    difficulty        text references drill_difficulties(id) on delete set null,
+
+    -- Tekken patch version this drill was recorded against. The slot
+    -- format and movelist IDs are version-sensitive — drills don't
+    -- cleanly cross-load between versions. The mod fills this from a
+    -- compile-time constant (OPENDOJO_TEKKEN_VERSION).
+    game_version      text check (char_length(game_version) <= 24),
 
     -- The actual drill payload. Inline TEXT; Postgres TOAST handles
     -- compression + out-of-line storage. Hard-capped at 64 KB so a
@@ -51,6 +97,17 @@ create table drills (
 
     uploader_id       uuid references auth.users(id) on delete set null,
     downloads         bigint not null default 0,
+
+    -- Denormalized like count. The `likes` table is the source of
+    -- truth; this column is kept in sync by the toggle_like RPC so
+    -- the Browse tab can sort by popularity without a join.
+    likes             bigint not null default 0,
+
+    -- Denormalized report count. The `drill_reports` table is the
+    -- source of truth; report_drill bumps this column. Crossing the
+    -- threshold (3) auto-flips status to 'flagged' so a swarm of
+    -- reports hides the drill without admin intervention.
+    reports           bigint not null default 0,
 
     -- 'public': visible to everyone.
     -- 'flagged': hidden from listings but still readable by id (so the
@@ -80,8 +137,74 @@ create table drills (
 create unique index drills_content_hash_idx on drills (content_hash);
 create        index drills_browse_idx       on drills (character, status, created_at desc);
 create        index drills_top_idx          on drills (status, downloads desc);
+create        index drills_likes_idx        on drills (status, likes desc);
+create        index drills_reports_idx      on drills (status, reports desc);
 create        index drills_uploader_idx     on drills (uploader_id);
 create        index drills_search_idx       on drills using gin (search_tsv);
+create        index drills_categories_idx   on drills using gin (categories);
+create        index drills_difficulty_idx   on drills (difficulty);
+create        index drills_version_idx      on drills (game_version);
+
+-- =============================================================
+-- likes — one row per (user, drill) the user has liked. The
+-- (user_id, drill_id) primary key prevents double-liking. The
+-- denormalized drills.likes counter is maintained by toggle_like.
+-- =============================================================
+
+create table likes (
+    user_id    uuid not null references auth.users(id) on delete cascade,
+    drill_id   uuid not null references drills(id)     on delete cascade,
+    created_at timestamptz not null default now(),
+    primary key (user_id, drill_id)
+);
+create index likes_drill_idx on likes (drill_id);
+
+-- =============================================================
+-- user_bans — moderation. Presence of a row blocks the user from
+-- the upload path (the submit_drill Edge Function consults this
+-- table before inserting). Reads / likes are not affected; the
+-- goal is to stop new harmful content, not nuke the account.
+--
+-- Only the service_role role can read/write this table — the
+-- admin panel hits it directly with the service_role key. The
+-- Edge Function consults it via its service-role client.
+-- =============================================================
+
+create table user_bans (
+    user_id    uuid primary key references auth.users(id) on delete cascade,
+    reason     text,
+    banned_at  timestamptz not null default now()
+);
+
+alter table user_bans enable row level security;
+
+-- =============================================================
+-- drill_reports — user-submitted complaints about a drill. Used
+-- both to surface bad content to the admin panel and to auto-hide
+-- drills that pile up enough reports.
+--
+-- Composite (drill_id, user_id) PK means one report per user per
+-- drill — a single offended user can't inflate the count by
+-- spamming. report_drill is the only write path; admin reads via
+-- service_role. Anon/authenticated cannot read this table directly
+-- (would leak who reported whom).
+-- =============================================================
+
+create table drill_reports (
+    drill_id   uuid not null references drills(id)     on delete cascade,
+    user_id    uuid not null references auth.users(id) on delete cascade,
+    reason     text check (char_length(reason) <= 240),
+    created_at timestamptz not null default now(),
+    primary key (drill_id, user_id)
+);
+create index drill_reports_drill_idx on drill_reports (drill_id);
+create index drill_reports_recent_idx on drill_reports (created_at desc);
+
+alter table drill_reports enable row level security;
+-- No client policies; service_role bypasses RLS for the admin panel.
+-- No policies and no grants to anon/authenticated — service_role
+-- bypasses RLS, so the admin panel works while clients can't touch
+-- the table even with the anon key.
 
 -- =============================================================
 -- drill_summaries view — the ONLY shape anon/authenticated can list.
@@ -100,8 +223,16 @@ select
     cpu_side,
     recordings_count,
     author_handle,
+    categories,
+    difficulty,
+    game_version,
     size_bytes,
     downloads,
+    likes,
+    -- "Is this drill mine?" computed from the calling user's JWT.
+    -- We don't expose `uploader_id` itself (that would let any client
+    -- correlate drills by uploader); just the boolean for the UI.
+    (uploader_id = auth.uid()) as is_mine,
     created_at
 from drills
 where status = 'public';
@@ -117,6 +248,7 @@ create table rate_limits (
     day        date not null default current_date,
     uploads    int  not null default 0,
     downloads  int  not null default 0,
+    reports    int  not null default 0,
     primary key (user_id, day)
 );
 
@@ -188,6 +320,141 @@ end;
 $$;
 
 -- =============================================================
+-- toggle_like(uuid) — atomic like/unlike.
+-- Returns the new like count for the drill. If the user already
+-- liked it, this removes the like; otherwise it adds one. Anon
+-- users can call it (SECURITY DEFINER so the RPC owns the writes
+-- to drills.likes; the table itself stays inaccessible).
+-- =============================================================
+
+create function toggle_like(p_drill_id uuid)
+returns int
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_user_id    uuid := auth.uid();
+    v_inserted   int;
+    v_likes      bigint;
+begin
+    if v_user_id is null then
+        raise exception 'authentication required' using errcode = '42501';
+    end if;
+
+    -- Try to insert; on PK conflict the row already exists.
+    insert into likes (user_id, drill_id)
+    values (v_user_id, p_drill_id)
+    on conflict do nothing;
+    get diagnostics v_inserted = ROW_COUNT;
+
+    if v_inserted > 0 then
+        update drills set likes = likes + 1
+         where id = p_drill_id and status = 'public'
+        returning likes into v_likes;
+    else
+        delete from likes
+         where user_id = v_user_id and drill_id = p_drill_id;
+        update drills set likes = greatest(0, likes - 1)
+         where id = p_drill_id and status = 'public'
+        returning likes into v_likes;
+    end if;
+
+    -- v_likes is null only if the drill was removed between the
+    -- summary fetch and the toggle; return 0 in that case.
+    return coalesce(v_likes, 0)::int;
+end;
+$$;
+
+-- =============================================================
+-- delete_my_drill(uuid) — author-initiated hard delete.
+-- Only deletes if the caller is the uploader; silently returns
+-- false otherwise (UI never shows the action to non-owners).
+-- Cascades remove likes via the FK on delete cascade. We hard
+-- delete rather than soft-mark removed so the user can re-upload
+-- the same content later without the unique-content-hash index
+-- treating it as a duplicate of their own removed row.
+-- =============================================================
+
+create function delete_my_drill(p_drill_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_user_id uuid := auth.uid();
+    v_deleted int;
+begin
+    if v_user_id is null then
+        raise exception 'authentication required' using errcode = '42501';
+    end if;
+    delete from drills
+     where id = p_drill_id and uploader_id = v_user_id;
+    get diagnostics v_deleted = ROW_COUNT;
+    return v_deleted > 0;
+end;
+$$;
+
+-- =============================================================
+-- report_drill(uuid, text) — file a moderation complaint.
+-- One report per user per drill (composite PK). Hits a daily
+-- rate-limit counter (rate_limits.reports, 10/day) to keep spam
+-- bounded. Auto-flips status to 'flagged' when the report counter
+-- crosses 3 — flagged drills disappear from drill_summaries
+-- (filtered by status = 'public') so further harm is contained
+-- until admin reviews.
+-- =============================================================
+
+create function report_drill(p_drill_id uuid, p_reason text default null)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    v_user_id  uuid := auth.uid();
+    v_inserted int;
+    v_reports  int;
+begin
+    if v_user_id is null then
+        raise exception 'authentication required' using errcode = '42501';
+    end if;
+
+    -- Daily report-rate limit. Atomic insert-then-bump.
+    insert into rate_limits as r (user_id, day, reports)
+    values (v_user_id, current_date, 1)
+    on conflict (user_id, day)
+        do update set reports = r.reports + 1
+    returning r.reports into v_reports;
+
+    if v_reports > 10 then
+        raise exception 'report rate limit exceeded (10/day)'
+            using errcode = 'P0001';
+    end if;
+
+    -- One report per (drill, user) — quiet conflict is the
+    -- success path for "you already reported this".
+    insert into drill_reports (drill_id, user_id, reason)
+    values (p_drill_id, v_user_id, p_reason)
+    on conflict (drill_id, user_id) do nothing;
+    get diagnostics v_inserted = ROW_COUNT;
+
+    if v_inserted > 0 then
+        update drills
+           set reports = reports + 1,
+               status  = case
+                            when reports + 1 >= 3 and status = 'public'
+                              then 'flagged'
+                            else status
+                         end
+         where id = p_drill_id;
+    end if;
+    return v_inserted > 0;
+end;
+$$;
+
+-- =============================================================
 -- try_record_submission(uuid) — atomic upload rate-limit check.
 -- Called by the submit_drill Edge Function (service_role) before it
 -- inserts a new drill. Returns the user's current daily upload count
@@ -223,18 +490,41 @@ $$;
 
 alter table drills        enable row level security;
 alter table rate_limits   enable row level security;
+alter table likes         enable row level security;
 
 -- No policies = no rows visible. We intentionally do not grant any.
--- The view + function are the supported read paths.
+-- The view + functions are the supported read/write paths.
 
 -- Function/view grants. Revoke defaults first so we know exactly
 -- what's exposed.
 revoke all on drills              from anon, authenticated;
 revoke all on rate_limits         from anon, authenticated;
+revoke all on likes               from anon, authenticated;
 revoke all on drill_summaries     from anon, authenticated;
+
+-- The lookup tables are public reference data, safe to expose.
+-- If the project has "automatically enable RLS on new tables"
+-- turned on (recommended), those tables come up with RLS enabled
+-- and no policies — which means SELECT returns zero rows even
+-- with the GRANT below. The explicit read policies make them
+-- queryable regardless of the project-level setting.
+alter table drill_categories   enable row level security;
+alter table drill_difficulties enable row level security;
+create policy drill_categories_public_read   on drill_categories
+    for select to anon, authenticated using (true);
+create policy drill_difficulties_public_read on drill_difficulties
+    for select to anon, authenticated using (true);
+grant  select on drill_categories     to anon, authenticated;
+grant  select on drill_difficulties   to anon, authenticated;
 
 grant  select on drill_summaries  to   anon, authenticated;
 grant  execute on function get_drill(uuid)
+                                  to   anon, authenticated;
+grant  execute on function toggle_like(uuid)
+                                  to   anon, authenticated;
+grant  execute on function delete_my_drill(uuid)
+                                  to   anon, authenticated;
+grant  execute on function report_drill(uuid, text)
                                   to   anon, authenticated;
 
 -- try_record_submission is only ever called by the Edge Function

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -252,6 +253,10 @@ const char* character_name_internal(std::uint32_t id) {
         case 38: return "fahkumram";
         case 39: return "armor_king";
         case 40: return "miary_zo";
+        case 41: return "kunimitsu";
+        case 42: return "bob";
+        case 43: return "roger_jr";
+        case 44: return "yujiro";
         case 116: return "practice_dummy";
         case 117: return "angel_jin";
         case 118: return "true_devil_kazuya";
@@ -272,6 +277,22 @@ const char* character_name_internal(std::uint32_t id) {
 
 const char* character_name(std::uint32_t id) {
     return character_name_internal(id);
+}
+
+std::vector<std::string> character_roster() {
+    // Iterate the playable-id space (0..99). character_name_internal
+    // returns nullptr for unassigned slots and we skip those, so the
+    // upper bound is a soft "more than there'll ever be playables"
+    // — anything above falls into the NPC range (116+) and shouldn't
+    // appear in user-facing filters.
+    constexpr std::uint32_t kPlayableIdMax = 99;
+    std::vector<std::string> out;
+    out.reserve(48);
+    for (std::uint32_t id = 0; id <= kPlayableIdMax; ++id) {
+        if (auto n = character_name_internal(id)) { out.emplace_back(n); }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 const char* side_to_string(Side s) {
@@ -366,6 +387,51 @@ std::uintptr_t cpu_player_address() {
     std::uint8_t human_player_id = 0;
     if (!memory::try_read_u8(info + OFF_PLAYER_ID, &human_player_id)) return 0;
     return (human_player_id == 0) ? p2 : p1;
+}
+
+// ---------------------------------------------------------------------------
+// Steam persona via the steam_api64.dll flat shim.
+//
+// Tekken's HUD nameplate is the Steam persona of the launching account;
+// we resolve the same value through the API the game itself uses. The
+// flat C exports are version-stable in a way the C++ vtable methods
+// aren't, so this keeps working across Steam SDK bumps.
+//
+// We deliberately do NOT call SteamAPI_Init() — Tekken has already done
+// that. Calling it again from a foreign DLL risks tripping Steam's
+// "another instance" guard. We only consume the already-live state.
+// ---------------------------------------------------------------------------
+std::string local_username() {
+    HMODULE steam = GetModuleHandleW(L"steam_api64.dll");
+    if (!steam) {
+        // Mod could be running in a non-Steam launch — log once at
+        // info level, return empty silently.
+        return {};
+    }
+
+    using SteamFriendsFn = void* (*)();
+    using GetPersonaNameFn = const char* (*)(void* /*self*/);
+
+    auto steam_friends = reinterpret_cast<SteamFriendsFn>(GetProcAddress(steam, "SteamFriends"));
+    auto get_persona_name = reinterpret_cast<GetPersonaNameFn>(
+        GetProcAddress(steam, "SteamAPI_ISteamFriends_GetPersonaName"));
+    if (!steam_friends || !get_persona_name) {
+        OPENDOJO_LOG(
+            "players::local_username: steam_api64.dll missing flat exports "
+            "(SteamFriends=%p GetPersonaName=%p) — returning empty",
+            static_cast<void*>(steam_friends), static_cast<void*>(get_persona_name));
+        return {};
+    }
+
+    void* self = steam_friends();
+    if (!self) return {};
+
+    // The shim returns a pointer owned by Steam — copy it before
+    // returning so we don't hold a pointer into Steam's address space
+    // any longer than we have to.
+    const char* name = get_persona_name(self);
+    if (!name || !*name) return {};
+    return std::string(name);
 }
 
 }  // namespace opendojo::players

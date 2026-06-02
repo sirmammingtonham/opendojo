@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // Live read of P1/P2 character ids and human-vs-CPU side, used at drill
 // export time to auto-fill the drill's character/cpu_side header.
@@ -43,6 +44,15 @@ bool parse_side(std::string_view s, Side& out);
 // ids outside the known roster; callers should format "unknown_<id>".
 const char* character_name(std::uint32_t id);
 
+// Sorted list of every playable character name. The cloud Browse
+// tab's character-filter combo iterates this so the dropdown stays
+// in sync with character_name() when a DLC pass adds new ids — one
+// place to update instead of two.
+//
+// Built from the same id -> name table; NPC-only ids (the 116+
+// range) are skipped by virtue of the playable-id ceiling.
+std::vector<std::string> character_roster();
+
 // True iff a round is actively in progress (not the intro / round-start
 // animation). Reads Player1[0x15C0] = frames_since_round_start (Irony's
 // offset for T8). Returns 0 / false when out of a match or during the
@@ -64,5 +74,22 @@ std::uintptr_t cpu_player_address();
 // and +0x38 are the P1 / P2 player pointer slots. Used by diag_hook
 // to install a one-shot hardware write-watch.
 std::uintptr_t holder_address();
+
+// Local player display name as Tekken sees it. In practice that's the
+// Steam persona on whichever Steam account launched the game — Tekken
+// pulls it through steam_api64.dll and uses it for the HUD nameplate.
+//
+// We resolve the persona by GetProcAddress'ing two exports from the
+// already-loaded steam_api64.dll:
+//   * SteamFriends                                 -> opaque self ptr
+//   * SteamAPI_ISteamFriends_GetPersonaName(self)  -> UTF-8 string
+// Using the flat shim keeps us ABI-stable against Steam SDK version
+// drift (the shim knows its vtable, we don't).
+//
+// Returns "" if steam_api64.dll isn't loaded, the symbols aren't
+// exported by this game's bundled version, or Steam isn't logged in.
+// Callers (the cloud upload path) treat empty as "unknown handle"
+// and fall back to the user's manual override from config.
+std::string local_username();
 
 }  // namespace opendojo::players
