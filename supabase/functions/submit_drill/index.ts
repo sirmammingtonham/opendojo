@@ -24,6 +24,7 @@ import {
     type SubmitBody,
     validate,
 } from "./validate.ts";
+import { containsBannedLanguage } from "./profanity.ts";
 
 const SUPABASE_URL              = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY         = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -88,6 +89,21 @@ Deno.serve(async (req) => {
     const v = validate(body);
     if ("err" in v) return json(400, { error: v.err });
     const drill = v.ok;
+
+    // Content moderation. Reject profanity / hate speech in the
+    // human-visible fields before anything touches the database. The drill
+    // body itself is machine data (recording event lines) and isn't screened
+    // here; user reports + auto-hide cover anything that gets through.
+    if (
+        containsBannedLanguage(drill.name) ||
+        containsBannedLanguage(drill.description) ||
+        containsBannedLanguage(drill.author_handle)
+    ) {
+        return json(400, {
+            error:
+                "Name, description, and author handle must not contain profanity or hate speech.",
+        });
+    }
 
     const contentHash = await sha256Hex(drill.content);
     const sizeBytes   = new TextEncoder().encode(drill.content).byteLength;

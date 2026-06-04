@@ -106,8 +106,8 @@ create table drills (
 
     -- Denormalized report count. The `drill_reports` table is the
     -- source of truth; report_drill bumps this column. Crossing the
-    -- threshold (3) auto-flips status to 'flagged' so a swarm of
-    -- reports hides the drill without admin intervention.
+    -- threshold (10) auto-flips status to 'flagged' so enough reports
+    -- hide the drill without admin intervention.
     reports           bigint not null default 0,
 
     -- 'public': visible to everyone.
@@ -255,13 +255,15 @@ create table rate_limits (
 
 create index rate_limits_day_idx on rate_limits (day);
 
--- Weekly: drop counters older than 7 days. The window we care about
--- is "today" — keeping a week of slack just gives a small buffer for
--- clock-skew edge cases without letting the table grow unbounded.
+-- Weekly: drop counters older than 90 days. We only enforce limits on
+-- "today", but the admin_daily_stats view (below) sums historical
+-- rate_limits.downloads for its chart, so we keep a 90-day window rather
+-- than a few days. 90 days at ~5k DAU is ~450k rows * ~80 bytes = ~36 MB —
+-- well within the free-tier 500 MB ceiling.
 select cron.schedule(
     'opendojo-rate-limits-cleanup',
     '0 4 * * 1',  -- Mondays 04:00 UTC
-    $$ delete from public.rate_limits where day < current_date - 7 $$
+    $$ delete from public.rate_limits where day < current_date - 90 $$
 );
 
 -- =============================================================
@@ -402,9 +404,11 @@ $$;
 -- One report per user per drill (composite PK). Hits a daily
 -- rate-limit counter (rate_limits.reports, 10/day) to keep spam
 -- bounded. Auto-flips status to 'flagged' when the report counter
--- crosses 3 — flagged drills disappear from drill_summaries
+-- crosses 10 — flagged drills disappear from drill_summaries
 -- (filtered by status = 'public') so further harm is contained
--- until admin reviews.
+-- until admin reviews. 10 distinct reporters is a strong enough
+-- signal to auto-hide without letting a few throwaway anon accounts
+-- censor a drill.
 -- =============================================================
 
 create function report_drill(p_drill_id uuid, p_reason text default null)
@@ -445,7 +449,7 @@ begin
         update drills
            set reports = reports + 1,
                status  = case
-                            when reports + 1 >= 3 and status = 'public'
+                            when reports + 1 >= 10 and status = 'public'
                               then 'flagged'
                             else status
                          end
@@ -530,6 +534,114 @@ grant  execute on function report_drill(uuid, text)
 
 -- try_record_submission is only ever called by the Edge Function
 -- (service_role), so we do not grant it to anon/authenticated.
+
+-- =============================================================
+-- Admin dashboard aggregations.
+--
+-- These views are read-only and exposed ONLY to service_role (the admin
+-- panel hits them with the service_role key, which bypasses RLS). We
+-- explicitly revoke anon/authenticated so an "expose all tables" default
+-- in Supabase can't let the public query them. They're owned by `postgres`
+-- and run as the owner (not security_invoker) so underlying-table RLS
+-- doesn't apply when service_role queries them — fine, because the revokes
+-- keep public roles out entirely.
+-- =============================================================
+
+-- admin_daily_stats — per-day metrics for the last 90 days. The
+-- generate_series CTE pins the row count to "today minus 90" so gaps in the
+-- source tables don't become gaps in the chart. Downloads are summed from
+-- rate_limits (one row per user-day); the 90-day cleanup window above keeps
+-- this column populated.
+create view admin_daily_stats as
+with days as (
+    select generate_series(
+        (current_date - interval '89 days')::date,
+        current_date,
+        interval '1 day'
+    )::date as day
+),
+ups as (
+    select created_at::date as day, count(*)::bigint as n
+    from drills
+    where created_at >= current_date - interval '90 days'
+    group by 1
+),
+liks as (
+    select created_at::date as day, count(*)::bigint as n
+    from likes
+    where created_at >= current_date - interval '90 days'
+    group by 1
+),
+reps as (
+    select created_at::date as day, count(*)::bigint as n
+    from drill_reports
+    where created_at >= current_date - interval '90 days'
+    group by 1
+),
+dls as (
+    select day, sum(downloads)::bigint as n
+    from rate_limits
+    where day >= current_date - interval '90 days'
+    group by day
+)
+select
+    d.day,
+    coalesce(ups.n,  0) as uploads,
+    coalesce(dls.n,  0) as downloads,
+    coalesce(liks.n, 0) as likes,
+    coalesce(reps.n, 0) as reports
+from days d
+left join ups  on ups.day  = d.day
+left join liks on liks.day = d.day
+left join reps on reps.day = d.day
+left join dls  on dls.day  = d.day
+order by d.day;
+
+-- admin_character_counts — drill distribution by character, including
+-- flagged (admin wants to see those) but excluding removed. Sorted desc so
+-- the dashboard can `limit 10` for a Top-N chart.
+create view admin_character_counts as
+select character, count(*)::bigint as n
+from drills
+where status in ('public', 'flagged')
+group by character
+order by count(*) desc;
+
+-- admin_overview — one-row snapshot consolidating the stat cards into a
+-- single round-trip.
+create view admin_overview as
+select
+    (select count(*)::bigint from drills)
+        as total_drills,
+    (select count(*)::bigint from drills where status = 'public')
+        as public_drills,
+    (select count(*)::bigint from drills where status = 'flagged')
+        as flagged_drills,
+    (select count(*)::bigint from drills where status = 'removed')
+        as removed_drills,
+    (select coalesce(sum(downloads), 0)::bigint from drills)
+        as total_downloads,
+    (select coalesce(sum(likes), 0)::bigint from drills)
+        as total_likes,
+    (select count(distinct uploader_id)::bigint from drills
+        where uploader_id is not null)
+        as distinct_uploaders,
+    (select count(*)::bigint from user_bans)
+        as banned_users,
+    (select count(*)::bigint from drill_reports
+        where created_at > now() - interval '24 hours')
+        as reports_24h;
+
+-- Belt-and-suspenders: by default Supabase exposes public views to
+-- anon/authenticated via PostgREST. These aggregate every user's behavior,
+-- so they must stay admin-only.
+revoke all on admin_daily_stats        from anon, authenticated;
+revoke all on admin_character_counts   from anon, authenticated;
+revoke all on admin_overview           from anon, authenticated;
+
+grant select on admin_daily_stats      to service_role;
+grant select on admin_character_counts to service_role;
+grant select on admin_overview         to service_role;
 
 -- =============================================================
 -- Cap PostgREST page size at the database level. Even with the
