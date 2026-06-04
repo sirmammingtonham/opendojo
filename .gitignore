@@ -65,5 +65,8 @@ supabase/.temp/
 supabase/.env
 supabase/.env.local
 
+# Private operator runbooks (cloud setup, secrets handling) — never publish
+*.private.md
+
 # Rust target dir (research crate)
 dll/target/

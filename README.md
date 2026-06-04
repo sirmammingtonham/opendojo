@@ -127,27 +127,19 @@ cmake -B dll/build -S dll -A x64 -DOPENDOJO_DEPLOY_DIR="D:/Games/TEKKEN 8/Polari
 If `clang-format` is on the path or in a known VS install, it runs
 automatically before each build to keep the source tree formatted.
 
-### Cloud-enabled builds
+### Cloud features
 
-To enable the in-game Browse + Upload features the DLL needs the URL
-and public anon key of a Supabase project. See `supabase/README.md`
-for the one-time backend setup; the build command then becomes:
-
-```powershell
-cmake -B dll/build -S dll -A x64 `
-      -DOPENDOJO_SUPABASE_URL="https://<your-ref>.supabase.co" `
-      -DOPENDOJO_SUPABASE_ANON_KEY="<your anon public key>"
-cmake --build dll/build --config Release
-```
-
-A DLL built without those values still works — the Browse tab just
-shows a "cloud not configured" message.
+The in-game Browse + Upload tabs (OpenDojo Cloud) talk to a hosted
+service. Official release builds come with that wired up; source builds
+are compiled without cloud access, so the Browse/Upload tabs show a
+"cloud not configured" message and the rest of the mod works normally.
+Standing up your own backend isn't part of the public build setup.
 
 ## Monorepo layout
 
 - `dll/` — the mod itself (C++, Win32, ImGui).
-- `supabase/` — schema, RLS, Edge Function. Stand up your own backend
-  by following `supabase/README.md`.
+- `supabase/` — cloud backend source: schema, RLS, Edge Function.
+- `cloudflare/` — the rate-limiting proxy that fronts the backend.
 - `docs/` — reverse-engineering notes from when the mod was being
   built; not relevant to running it.
 - `research/` — Cheat Engine + Lua scratch work; same disclaimer.

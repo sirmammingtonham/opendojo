@@ -24,9 +24,17 @@ compatibility_date = "2026-01-01"
 # locally (e.g., to paste into the Cloudflare dashboard editor).
 
 # Project ref of your Supabase project — the prefix of <ref>.supabase.co.
-# Override via dashboard if you'd rather not commit it here.
+# Not a secret on its own (it's useless without the anon key, which the
+# Worker holds separately), but you can move it to the dashboard if you'd
+# rather not commit it.
 [vars]
 SUPABASE_REF = "REPLACE_ME"
+
+# SECRETS — never put these in [vars] or commit them. Set them with:
+#   wrangler secret put SUPABASE_ANON_KEY   # project anon key, injected upstream
+#   wrangler secret put PROXY_KEY           # shared key the DLL sends as X-OpenDojo-Key
+# The DLL is built with the SAME PROXY_KEY value (OPENDOJO_CLOUD_PROXY_KEY).
+# Rotating PROXY_KEY here + rebuilding the DLL cuts off old clients.
 
 # Per-IP rate limits. Each binding is one knob you can tweak later
 # without code changes; the Worker picks the right one by URL path.

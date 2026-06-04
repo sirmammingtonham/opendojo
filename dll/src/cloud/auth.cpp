@@ -88,11 +88,13 @@ bool apply_auth_response(const std::string& body, Token& out) {
 bool sign_up_anonymous(Token& out) {
     auto url = opendojo::cloud::auth_url() + "/signup";
     std::vector<opendojo::cloud::http::Header> headers = {
-        {"apikey", opendojo::cloud::anon_key()},
+        {"X-OpenDojo-Key", opendojo::cloud::proxy_key()},
         {"Content-Type", "application/json"},
     };
     // Empty object body — Supabase treats POST /signup with no email
     // as an anonymous sign-up when the project has anon-auth enabled.
+    // The proxy injects the apikey + anon bearer for this unauthenticated
+    // call.
     auto res = opendojo::cloud::http::post(url, headers, "{}");
     if (res.transport_error) {
         OPENDOJO_LOG("cloud/auth: signup transport error: %s", res.error_message.c_str());
@@ -110,7 +112,7 @@ bool refresh_token(Token& out) {
     nlohmann::json body;
     body["refresh_token"] = out.refresh;
     std::vector<opendojo::cloud::http::Header> headers = {
-        {"apikey", opendojo::cloud::anon_key()},
+        {"X-OpenDojo-Key", opendojo::cloud::proxy_key()},
         {"Content-Type", "application/json"},
     };
     auto res = opendojo::cloud::http::post(url, headers, body.dump());

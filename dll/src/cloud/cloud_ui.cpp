@@ -374,9 +374,8 @@ void draw_browse_tab() {
         ImGui::TextDisabled("OpenDojo Cloud is not configured in this build.");
         ImGui::Spacing();
         ImGui::TextWrapped(
-            "If you built the DLL yourself, pass -DOPENDOJO_SUPABASE_URL=... and "
-            "-DOPENDOJO_SUPABASE_ANON_KEY=... at configure time. See "
-            "supabase/README.md in the repo.");
+            "Source builds ship without cloud access — Browse and Upload are "
+            "disabled. Everything else works normally.");
         return;
     }
 

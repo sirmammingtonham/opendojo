@@ -20,12 +20,13 @@ namespace {
 
 using nlohmann::json;
 
-// Build the standard PostgREST/Functions header set: anon apikey +
-// user JWT bearer + JSON content type. Auth must already be valid
-// when this is called.
+// Build the standard PostgREST/Functions header set: proxy access key +
+// user JWT bearer + JSON content type. The backend apikey is injected by
+// the proxy, never sent by the client. Auth must already be valid when
+// this is called.
 std::vector<opendojo::cloud::http::Header> standard_headers() {
     return {
-        {"apikey", opendojo::cloud::anon_key()},
+        {"X-OpenDojo-Key", opendojo::cloud::proxy_key()},
         {"Authorization", "Bearer " + opendojo::cloud::auth::access_token()},
         {"Content-Type", "application/json"},
         {"Accept", "application/json"},

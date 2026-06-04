@@ -3,7 +3,8 @@
 -- Design notes:
 --   * Drill text is stored inline in the `drills.content` column. Drills
 --     average a few KB; Postgres TOAST handles large rows transparently
---     and lz/zstd-compresses them. See supabase/README.md for why.
+--     and lz/zstd-compresses them, so inline TEXT is cheaper than a blob
+--     store at this size.
 --   * No client role ever SELECTs from `drills` directly. The only read
 --     paths exposed to `anon`/`authenticated` are the `drill_summaries`
 --     view (metadata only, no content) and the `get_drill` SECURITY

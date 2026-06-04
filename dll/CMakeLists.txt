@@ -162,20 +162,21 @@ target_link_libraries(opendojo PRIVATE
 target_link_options(opendojo PRIVATE "/DEF:${OPENDOJO_PROXY_DEF}")
 
 # ---------------------------------------------------------------------------
-# Cloud backend coordinates. Empty defaults are intentional — a build with
-# unset values still compiles, but the in-game Browse/Upload features
-# detect the missing config and show "cloud not configured" instead of
-# trying to talk to a phantom server.
+# Cloud coordinates. Empty defaults are intentional — a build with unset
+# values still compiles, but the in-game Browse/Upload features detect the
+# missing config and show "cloud not configured" instead of trying to talk
+# to a phantom server.
 #
-# To enable cloud features:
-#   cmake -B build -S . -A x64 \
-#         -DOPENDOJO_SUPABASE_URL="https://<ref>.supabase.co" \
-#         -DOPENDOJO_SUPABASE_ANON_KEY="<anon public key>"
+# The DLL only ever talks to the OpenDojo Cloud proxy (a Cloudflare Worker).
+# It does NOT hold the backend's API key — the Worker injects that
+# server-side. The DLL holds only the proxy URL and a proxy access key.
+# (Provisioning is covered in the private cloud-setup notes, not in the
+# public tree.)
 # ---------------------------------------------------------------------------
-set(OPENDOJO_SUPABASE_URL ""
-    CACHE STRING "Supabase project URL, e.g. https://<ref>.supabase.co")
-set(OPENDOJO_SUPABASE_ANON_KEY ""
-    CACHE STRING "Supabase public anon key (safe to ship in the DLL)")
+set(OPENDOJO_CLOUD_URL ""
+    CACHE STRING "OpenDojo Cloud proxy URL, e.g. https://opendojo.example.com")
+set(OPENDOJO_CLOUD_PROXY_KEY ""
+    CACHE STRING "Proxy access key the DLL sends (gates the proxy; NOT the backend key)")
 
 # Tekken patch version this DLL targets. Recorded against every drill
 # uploaded from this build, so the Browse tab can warn when downloading
@@ -185,8 +186,8 @@ set(OPENDOJO_TEKKEN_VERSION "3.00.02"
     CACHE STRING "Tekken 8 version this DLL was built for (free-form, e.g. 3.00.02)")
 
 target_compile_definitions(opendojo PRIVATE
-    "OPENDOJO_SUPABASE_URL=\"${OPENDOJO_SUPABASE_URL}\""
-    "OPENDOJO_SUPABASE_ANON_KEY=\"${OPENDOJO_SUPABASE_ANON_KEY}\""
+    "OPENDOJO_CLOUD_URL=\"${OPENDOJO_CLOUD_URL}\""
+    "OPENDOJO_CLOUD_PROXY_KEY=\"${OPENDOJO_CLOUD_PROXY_KEY}\""
     "OPENDOJO_TEKKEN_VERSION=\"${OPENDOJO_TEKKEN_VERSION}\"")
 
 # Output filename = the proxy DLL name we're impersonating, no "lib" prefix.
