@@ -163,20 +163,13 @@ target_link_options(opendojo PRIVATE "/DEF:${OPENDOJO_PROXY_DEF}")
 
 # ---------------------------------------------------------------------------
 # Cloud coordinates. Empty defaults are intentional — a build with unset
-# values still compiles, but the in-game Browse/Upload features detect the
-# missing config and show "cloud not configured" instead of trying to talk
-# to a phantom server.
-#
-# The DLL only ever talks to the OpenDojo Cloud proxy (a Cloudflare Worker).
-# It does NOT hold the backend's API key — the Worker injects that
-# server-side. The DLL holds only the proxy URL and a proxy access key.
-# (Provisioning is covered in the private cloud-setup notes, not in the
-# public tree.)
+# values still compiles; the in-game Browse/Upload features just show a
+# "cloud not configured" state. Official builds set these.
 # ---------------------------------------------------------------------------
 set(OPENDOJO_CLOUD_URL ""
-    CACHE STRING "OpenDojo Cloud proxy URL, e.g. https://opendojo.example.com")
+    CACHE STRING "OpenDojo Cloud endpoint URL")
 set(OPENDOJO_CLOUD_PROXY_KEY ""
-    CACHE STRING "Proxy access key the DLL sends (gates the proxy; NOT the backend key)")
+    CACHE STRING "OpenDojo Cloud access key")
 
 # Tekken patch version this DLL targets. Recorded against every drill
 # uploaded from this build, so the Browse tab can warn when downloading

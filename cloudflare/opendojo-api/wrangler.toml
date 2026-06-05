@@ -1,43 +1,7 @@
-# Cloudflare Wrangler config for the opendojo-api Worker.
-#
-# This file lets you deploy via `wrangler deploy` instead of pasting
-# into the dashboard. Most fields below mirror what you'd set via the
-# dashboard UI; check them against your account's actual values
-# before the first `wrangler deploy`.
-#
-# To use:
-#   npm i -g wrangler
-#   wrangler login
-#   wrangler deploy
-#
-# After deploy, attach the custom domain in the dashboard
-# (Workers & Pages → opendojo-api → Triggers → Custom Domains) or
-# uncomment the routes section below with your zone.
-
 name           = "opendojo-api"
 main           = "worker.ts"
 compatibility_date = "2026-01-01"
 
-# wrangler bundles TypeScript via esbuild; no separate build step.
-# Run `wrangler deploy` to compile + ship in one go, or
-# `wrangler deploy --dry-run --outdir dist` if you want the JS bundle
-# locally (e.g., to paste into the Cloudflare dashboard editor).
-
-# Project ref of your Supabase project — the prefix of <ref>.supabase.co.
-# Not a secret on its own (it's useless without the anon key, which the
-# Worker holds separately), but you can move it to the dashboard if you'd
-# rather not commit it.
-[vars]
-SUPABASE_REF = "REPLACE_ME"
-
-# SECRETS — never put these in [vars] or commit them. Set them with:
-#   wrangler secret put SUPABASE_ANON_KEY   # project anon key, injected upstream
-#   wrangler secret put PROXY_KEY           # shared key the DLL sends as X-OpenDojo-Key
-# The DLL is built with the SAME PROXY_KEY value (OPENDOJO_CLOUD_PROXY_KEY).
-# Rotating PROXY_KEY here + rebuilding the DLL cuts off old clients.
-
-# Per-IP rate limits. Each binding is one knob you can tweak later
-# without code changes; the Worker picks the right one by URL path.
 [[unsafe.bindings]]
 name      = "RL_SIGNUP"
 type      = "ratelimit"
@@ -54,7 +18,7 @@ simple = { limit = 20, period = 3600 }
 name      = "RL_DOWNLOAD"
 type      = "ratelimit"
 namespace_id = "1003"
-simple = { limit = 100, period = 3600 }
+simple = { limit = 50, period = 3600 }
 
 [[unsafe.bindings]]
 name      = "RL_REPORT"
@@ -66,22 +30,16 @@ simple = { limit = 20, period = 3600 }
 name      = "RL_LIKE"
 type      = "ratelimit"
 namespace_id = "1005"
-simple = { limit = 200, period = 3600 }
+simple = { limit = 50, period = 3600 }
 
 [[unsafe.bindings]]
 name      = "RL_AUTH_OTHER"
 type      = "ratelimit"
 namespace_id = "1006"
-simple = { limit = 60, period = 60 }
+simple = { limit = 240, period = 3600 }
 
 [[unsafe.bindings]]
 name      = "RL_GENERAL"
 type      = "ratelimit"
 namespace_id = "1007"
-simple = { limit = 600, period = 60 }
-
-# To bind a custom domain via wrangler, uncomment + edit:
-# [[routes]]
-# pattern       = "opendojo.ethan.website/*"
-# zone_name     = "ethan.website"
-# custom_domain = true
+simple = { limit = 240, period = 3600 }

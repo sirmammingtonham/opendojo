@@ -8,10 +8,8 @@
 //      validate.ts. That module is pure-logic and unit-tested.
 //   3. Hash the content (SHA-256, hex). If a row with this hash
 //      already exists, return that id and tell the client it was a
-//      duplicate - don't double-count rate limits.
-//   4. Bump the user's daily upload counter via
-//      `try_record_submission`. If they're over the cap, abort.
-//   5. Insert. The unique index on content_hash is the final
+//      duplicate - don't re-insert.
+//   4. Insert. The unique index on content_hash is the final
 //      backstop against concurrent duplicate inserts.
 //
 // Errors return JSON { error: string } with a 4xx status. Anything
@@ -20,7 +18,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import {
     MAX_BODY_BYTES,
-    MAX_UPLOADS_PER_DAY,
     type SubmitBody,
     validate,
 } from "./validate.ts";
@@ -150,21 +147,6 @@ Deno.serve(async (req) => {
         }
         if (existing) {
             return json(200, { id: existing.id, deduped: true });
-        }
-    }
-
-    // Rate limit: atomically increment today's counter for this user.
-    {
-        const { data: uploads, error } = await admin
-            .rpc("try_record_submission", { p_user_id: userId });
-        if (error) {
-            console.error("try_record_submission failed", error);
-            return json(500, { error: "internal error" });
-        }
-        if (typeof uploads === "number" && uploads > MAX_UPLOADS_PER_DAY) {
-            return json(429, {
-                error: `upload rate limit exceeded (${MAX_UPLOADS_PER_DAY}/day)`,
-            });
         }
     }
 

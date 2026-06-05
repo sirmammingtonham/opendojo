@@ -70,7 +70,9 @@ Response do_request(const std::string& url, const std::wstring& verb,
     uc.dwExtraInfoLength = (DWORD)-1;
 
     auto wurl = widen(url);
-    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) { return fail("WinHttpCrackUrl"); }
+    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) {
+        return fail("WinHttpCrackUrl");
+    }
     if (uc.nScheme != INTERNET_SCHEME_HTTPS) {
         Response r;
         r.transport_error = true;
@@ -81,7 +83,9 @@ Response do_request(const std::string& url, const std::wstring& verb,
 
     std::wstring host(uc.lpszHostName, uc.dwHostNameLength);
     std::wstring path(uc.lpszUrlPath, uc.dwUrlPathLength);
-    if (uc.dwExtraInfoLength > 0) { path.append(uc.lpszExtraInfo, uc.dwExtraInfoLength); }
+    if (uc.dwExtraInfoLength > 0) {
+        path.append(uc.lpszExtraInfo, uc.dwExtraInfoLength);
+    }
 
     Handle session{WinHttpOpen(L"OpenDojo/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)};
@@ -138,7 +142,9 @@ Response do_request(const std::string& url, const std::wstring& verb,
     if (!WinHttpSendRequest(request, hdr_ptr, hdr_len, body_ptr, body_len, body_len, 0)) {
         return fail("WinHttpSendRequest");
     }
-    if (!WinHttpReceiveResponse(request, nullptr)) { return fail("WinHttpReceiveResponse"); }
+    if (!WinHttpReceiveResponse(request, nullptr)) {
+        return fail("WinHttpReceiveResponse");
+    }
 
     Response out;
 

@@ -79,7 +79,9 @@ WriteStatus set_recorded_flag(std::size_t slot_idx, bool recorded) {
     auto singleton = subsystems::lookup(subsystems::KEY_SINGLETON);
     auto subB = subsystems::lookup(subsystems::KEY_SUBB);
     auto subC = subsystems::lookup(subsystems::KEY_SUBC);
-    if (!gameplay || !singleton || !subB || !subC) { return WriteStatus::NotInPracticeMode; }
+    if (!gameplay || !singleton || !subB || !subC) {
+        return WriteStatus::NotInPracticeMode;
+    }
 
     auto flag_addr = gameplay + GAMEPLAY_SLOT_BASE + slot_idx * GAMEPLAY_SLOT_STRIDE +
                      GAMEPLAY_SLOT_FLAG;

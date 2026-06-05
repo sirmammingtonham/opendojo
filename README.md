@@ -129,20 +129,10 @@ automatically before each build to keep the source tree formatted.
 
 ### Cloud features
 
-The in-game Browse + Upload tabs (OpenDojo Cloud) talk to a hosted
-service. Official release builds come with that wired up; source builds
-are compiled without cloud access, so the Browse/Upload tabs show a
-"cloud not configured" message and the rest of the mod works normally.
-Standing up your own backend isn't part of the public build setup.
-
-## Monorepo layout
-
-- `dll/` — the mod itself (C++, Win32, ImGui).
-- `supabase/` — cloud backend source: schema, RLS, Edge Function.
-- `cloudflare/` — the rate-limiting proxy that fronts the backend.
-- `docs/` — reverse-engineering notes from when the mod was being
-  built; not relevant to running it.
-- `research/` — Cheat Engine + Lua scratch work; same disclaimer.
+The in-game Browse and Upload tabs (OpenDojo Cloud) are enabled in the
+official release builds. A DLL you build yourself is compiled without
+cloud access — those tabs show a "cloud not configured" message and
+everything else works normally.
 
 ## Compatibility
 

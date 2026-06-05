@@ -1,0 +1,148 @@
+name: CI
+
+# Lints + tests every component. Each job only runs when its paths change
+# (dorny/paths-filter), so a docs-only PR doesn't spin up a Windows build.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      cpp:    ${{ steps.filter.outputs.cpp }}
+      deno:   ${{ steps.filter.outputs.deno }}
+      worker: ${{ steps.filter.outputs.worker }}
+      sql:    ${{ steps.filter.outputs.sql }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            cpp:
+              - 'dll/**'
+              - '.clang-format'
+            deno:
+              - 'supabase/functions/**'
+            worker:
+              - 'cloudflare/**'
+            sql:
+              - 'supabase/migrations/**'
+              - 'supabase/config.toml'
+
+  # ---- C++ DLL -----------------------------------------------------------
+  # The compile is the real gate (MSVC, Win32, d3d). FetchContent pulls
+  # ImGui + MinHook. Built without cloud coords (compiles fine; the release
+  # workflow bakes those in).
+  cpp-build:
+    needs: changes
+    if: needs.changes.outputs.cpp == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B dll/build -S dll -A x64
+      - name: Build (Release)
+        run: cmake --build dll/build --config Release
+
+  # Enforced: the tree is formatted with clang-format 18.1.8 (pinned). The
+  # DLL build's PRE_BUILD hook auto-formats with whatever clang-format is on
+  # the contributor's machine, so use 18.x locally to avoid version drift
+  # tripping this check.
+  cpp-format:
+    needs: changes
+    if: needs.changes.outputs.cpp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pipx is preinstalled on ubuntu-latest; `pipx run` fetches + runs the
+      # pinned clang-format without PATH games. --Werror = fail on any diff.
+      - name: Check formatting
+        run: |
+          pipx run 'clang-format==18.1.8' --dry-run --Werror -style=file \
+            dll/src/*.cpp dll/src/*.hpp dll/src/cloud/*.cpp dll/src/cloud/*.hpp
+
+  # ---- Deno edge function ------------------------------------------------
+  deno:
+    needs: changes
+    if: needs.changes.outputs.deno == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: supabase/functions/submit_drill
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno lint
+      - run: deno check index.ts
+      - run: deno test --allow-net   # profanity tests fetch obscenity from esm.sh
+
+  # ---- Cloudflare Worker -------------------------------------------------
+  worker:
+    needs: changes
+    if: needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare/opendojo-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: cloudflare/opendojo-api/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck       # tsc --noEmit (strict)
+      - run: npm run bundle          # wrangler --dry-run: validates the bundle, no deploy
+
+  # ---- SQL migration -----------------------------------------------------
+  # Primary gate: apply the migration to a REAL Supabase Postgres (correct
+  # extensions: pg_cron/pgcrypto, the auth schema + auth.uid(), the
+  # anon/authenticated/service_role roles). `supabase start` fails if any
+  # migration errors — this is what catches syntax/extension/runtime bugs.
+  sql-apply:
+    needs: changes
+    if: needs.changes.outputs.sql == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Apply migrations to local Supabase stack
+        run: supabase start
+      - name: plpgsql lint (advisory)
+        run: supabase db lint --level warning
+        continue-on-error: true
+
+  # Secondary gate: Squawk lint for lock-safety / destructive DDL. Mostly a
+  # no-op on the greenfield migration (the excludes below are rules that
+  # only apply to ALTERs against a live, populated table); it earns its keep
+  # the first time someone writes a migration that changes an existing table.
+  sql-squawk:
+    needs: changes
+    if: needs.changes.outputs.sql == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install -g squawk-cli
+      - name: Lint migrations
+        run: |
+          squawk \
+            --exclude=require-timeout-settings,prefer-robust-stmts,prefer-bigint-over-int,require-concurrent-index-creation \
+            supabase/migrations/*.sql

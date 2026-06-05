@@ -1,0 +1,47 @@
+name: Release DLL
+
+# Manual release. Trigger from Actions → Release DLL → Run workflow with a
+# tag; builds the DLL from the selected ref and publishes a GitHub Release.
+# Requires the cloud build secrets configured in repo settings.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, e.g. v1.2.0'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as a pre-release'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create the release + tag + upload the asset
+
+jobs:
+  build:
+    runs-on: windows-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (cloud-enabled)
+        run: >
+          cmake -B dll/build -S dll -A x64
+          -DOPENDOJO_CLOUD_URL="${{ secrets.OPENDOJO_CLOUD_URL }}"
+          -DOPENDOJO_CLOUD_PROXY_KEY="${{ secrets.OPENDOJO_CLOUD_PROXY_KEY }}"
+      - name: Build (Release)
+        run: cmake --build dll/build --config Release
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: dll/build/Release/dinput8.dll

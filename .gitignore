@@ -65,8 +65,12 @@ supabase/.temp/
 supabase/.env
 supabase/.env.local
 
-# Private operator runbooks (cloud setup, secrets handling) — never publish
+# Local-only notes
 *.private.md
 
 # Rust target dir (research crate)
 dll/target/
+
+# Node deps (lockfile is committed, deps are not)
+node_modules/
+cloudflare/opendojo-api/dist/

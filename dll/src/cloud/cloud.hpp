@@ -2,12 +2,10 @@
 
 #include <string>
 
-// Top-level cloud module helpers. The proxy URL + proxy access key are
-// baked into the DLL at compile time via CMake cache variables
-// (OPENDOJO_CLOUD_URL / OPENDOJO_CLOUD_PROXY_KEY). The DLL never holds the
-// backend's own API key — the proxy injects that server-side. Builds
-// without values produce a DLL that still loads — the menu just renders a
-// "cloud features not configured" state.
+// Top-level cloud module helpers. The cloud URL + access key are baked into
+// the DLL at compile time via CMake cache variables (OPENDOJO_CLOUD_URL /
+// OPENDOJO_CLOUD_PROXY_KEY). Builds without values produce a DLL that still
+// loads — the menu just renders a "cloud features not configured" state.
 
 namespace opendojo::cloud {
 
@@ -17,7 +15,7 @@ bool configured();
 
 // Always non-null. Empty string if not configured.
 const std::string& base_url();
-// Proxy access key, sent as the X-OpenDojo-Key header on every request.
+// Access key sent with each request.
 const std::string& proxy_key();
 
 // Tekken patch the DLL was built for (e.g. "3.00.02"). Stamped onto

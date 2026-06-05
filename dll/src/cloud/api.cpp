@@ -20,10 +20,8 @@ namespace {
 
 using nlohmann::json;
 
-// Build the standard PostgREST/Functions header set: proxy access key +
-// user JWT bearer + JSON content type. The backend apikey is injected by
-// the proxy, never sent by the client. Auth must already be valid when
-// this is called.
+// Standard request headers: access key + user JWT bearer + JSON content
+// type. Auth must already be valid when this is called.
 std::vector<opendojo::cloud::http::Header> standard_headers() {
     return {
         {"X-OpenDojo-Key", opendojo::cloud::proxy_key()},
@@ -167,7 +165,9 @@ ListResult list_drills(const ListQuery& q) {
     std::ostringstream url;
     url << opendojo::cloud::rest_url() << "/drill_summaries?";
     url << "select=*";
-    if (!q.character_filter.empty()) { url << "&character=eq." << url_encode(q.character_filter); }
+    if (!q.character_filter.empty()) {
+        url << "&character=eq." << url_encode(q.character_filter);
+    }
     if (!q.search_query.empty()) {
         // PostgREST FTS: ?search_tsv=fts(simple).<term>. Use prefix
         // matching by appending :* so "jin" matches "jin string".
@@ -351,7 +351,9 @@ DeleteResult delete_my_drill(const std::string& drill_id) {
         out.deleted = j[0].get<bool>();
     }
     out.ok = true;
-    if (!out.deleted) { out.error_message = "drill not found or not yours"; }
+    if (!out.deleted) {
+        out.error_message = "drill not found or not yours";
+    }
     return out;
 }
 

@@ -688,7 +688,9 @@ void draw_browse_tab() {
 
             // ---- Download (+ owner-only Delete stacked beneath) ----
             ImGui::TableSetColumnIndex(5);
-            if (ImGui::Button("Download", ImVec2(-1, 0))) { kick_download(d.id, d.name); }
+            if (ImGui::Button("Download", ImVec2(-1, 0))) {
+                kick_download(d.id, d.name);
+            }
             if (d.is_mine) {
                 if (destructive_button("Delete##rowdel", ImVec2(-1, 0))) {
                     g_browse.delete_target_id = d.id;
@@ -718,7 +720,9 @@ void draw_browse_tab() {
             "Other players will lose access immediately. Their likes "
             "and downloads are removed too. This can't be undone.");
         ImGui::Spacing();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::SameLine();
         if (destructive_button("Delete", ImVec2(120, 0))) {
             kick_delete_my_drill(g_browse.delete_target_id, g_browse.delete_target_name);
@@ -748,7 +752,9 @@ void draw_browse_tab() {
             ImVec2(380, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2));
         ImGui::PopItemWidth();
         ImGui::Spacing();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::SameLine();
         if (ImGui::Button("Submit report", ImVec2(140, 0))) {
             kick_report(g_browse.report_target_id, g_browse.report_target_name,

@@ -8,19 +8,17 @@
 --   * No client role ever SELECTs from `drills` directly. The only read
 --     paths exposed to `anon`/`authenticated` are the `drill_summaries`
 --     view (metadata only, no content) and the `get_drill` SECURITY
---     DEFINER function (single-row read, rate-limited, bumps counters).
+--     DEFINER function (single-row read; bumps the lifetime download count).
 --   * No client role ever writes to `drills`. The only write path is
 --     the `submit_drill` Edge Function, which uses the service-role key
---     and validates+rate-limits in TypeScript before inserting.
---   * Rate limiting uses a single `rate_limits` table keyed on
---     (user_id, day) and incremented atomically via INSERT ... ON
---     CONFLICT. This caps storage at O(users * active_days) and is
---     trivially aged out by a weekly cron.
+--     and validates in TypeScript before inserting.
+--   * The database keeps no per-user rate-limit counters; `daily_stats`
+--     below is a metrics-only rollup, never read to gate a request.
 
 set search_path = public, extensions;
 
 -- pg_cron is preinstalled in Supabase; it lives in the `extensions`
--- schema. We use it for the weekly rate-limit cleanup.
+-- schema. We use it for the nightly stats rollup.
 create extension if not exists pg_cron with schema extensions;
 create extension if not exists pgcrypto;  -- for gen_random_uuid + sha256
 
@@ -239,46 +237,83 @@ from drills
 where status = 'public';
 
 -- =============================================================
--- rate_limits — daily counters per user. Both upload and download
--- limits are tracked here so the table itself stays tiny
--- (O(users * active_days)). pg_cron prunes weekly.
+-- daily_stats — PERMANENT, metrics-only per-day rollup. One row per active
+-- day holds the counts the dashboard charts (uploads / likes / reports).
+-- Never pruned and never read to gate a request: it's tiny (~365 rows/year)
+-- and exists purely so historical counts survive later deletion of
+-- drills / likes / reports. The nightly job freezes each completed day from
+-- the live tables' created_at.
+--
+-- Downloads are NOT tracked per-day — only the lifetime running total in
+-- drills.downloads (surfaced as admin_overview.total_downloads). That keeps
+-- get_drill a pure read + a single counter bump, with no extra write.
 -- =============================================================
 
-create table rate_limits (
-    user_id    uuid not null references auth.users(id) on delete cascade,
-    day        date not null default current_date,
-    uploads    int  not null default 0,
-    downloads  int  not null default 0,
-    reports    int  not null default 0,
-    primary key (user_id, day)
+create table daily_stats (
+    day      date   primary key,
+    uploads  bigint not null default 0,
+    likes    bigint not null default 0,
+    reports  bigint not null default 0
 );
 
-create index rate_limits_day_idx on rate_limits (day);
+-- run_daily_maintenance — freeze completed days' counts into daily_stats so
+-- they survive later deletions. Idempotent and self-healing:
+--   * Only completed days (day < today) are frozen; today stays live.
+--   * A day already in daily_stats is never recomputed (NOT EXISTS +
+--     ON CONFLICT DO NOTHING), so later deletions can't rewrite history.
+--   * Zero-activity days are skipped (the view gap-fills them as 0).
+--   * The 14-day window backfills any night the job didn't run (e.g. a
+--     free-tier project that was asleep).
+-- Internal only: SECURITY DEFINER, execute revoked from the public roles
+-- below — the pg_cron job is the sole caller.
+create function run_daily_maintenance()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    insert into daily_stats (day, uploads, likes, reports)
+    select day, uploads, likes, reports
+    from (
+        select
+            d.day,
+            coalesce((select count(*) from drills        where created_at::date = d.day), 0) as uploads,
+            coalesce((select count(*) from likes         where created_at::date = d.day), 0) as likes,
+            coalesce((select count(*) from drill_reports where created_at::date = d.day), 0) as reports
+        from (
+            select generate_series(current_date - 14, current_date - 1, interval '1 day')::date as day
+        ) d
+        where not exists (select 1 from daily_stats s where s.day = d.day)
+    ) rolled
+    where uploads + likes + reports > 0
+    on conflict (day) do nothing;
+end;
+$$;
 
--- Weekly: drop counters older than 90 days. We only enforce limits on
--- "today", but the admin_daily_stats view (below) sums historical
--- rate_limits.downloads for its chart, so we keep a 90-day window rather
--- than a few days. 90 days at ~5k DAU is ~450k rows * ~80 bytes = ~36 MB —
--- well within the free-tier 500 MB ceiling.
+revoke execute on function run_daily_maintenance() from public, anon, authenticated;
+
+-- Nightly at 00:10 UTC: freeze completed days into daily_stats.
 select cron.schedule(
-    'opendojo-rate-limits-cleanup',
-    '0 4 * * 1',  -- Mondays 04:00 UTC
-    $$ delete from public.rate_limits where day < current_date - 90 $$
+    'opendojo-daily-maintenance',
+    '10 0 * * *',
+    $$ select public.run_daily_maintenance() $$
 );
 
 -- =============================================================
--- get_drill(uuid) — single-drill read.
--- Bumps the download counter, enforces 100 downloads/day per user,
--- returns the content. SECURITY DEFINER because the function does
--- the auth.uid() bookkeeping while running with elevated privileges
--- to bypass the table-level RLS (anon has no SELECT on drills).
+-- get_drill(uuid) — single-drill read. Bumps the lifetime download counter
+-- on drills and returns the content. SECURITY DEFINER to bypass the
+-- table-level RLS (anon has no SELECT on drills).
 -- =============================================================
 
 create function get_drill(p_drill_id uuid)
 returns table (
     id                uuid,
     name              text,
-    character         text,
+    -- "character" is quoted: it's a reserved word in the RETURNS TABLE
+    -- column grammar (unquoted is a syntax error). The output column is
+    -- still named `character`, so PostgREST / the client are unaffected.
+    "character"       text,
     content           text,
     size_bytes        int,
     recordings_count  int
@@ -287,26 +322,7 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-    v_user_id   uuid := auth.uid();
-    v_downloads int;
 begin
-    if v_user_id is null then
-        raise exception 'authentication required' using errcode = '42501';
-    end if;
-
-    -- Atomically increment today's download count for this user.
-    insert into rate_limits as r (user_id, day, downloads)
-    values (v_user_id, current_date, 1)
-    on conflict (user_id, day)
-        do update set downloads = r.downloads + 1
-    returning r.downloads into v_downloads;
-
-    if v_downloads > 100 then
-        raise exception 'download rate limit exceeded (100/day)'
-            using errcode = 'P0001';
-    end if;
-
     return query
     update drills d
        set downloads = d.downloads + 1
@@ -401,14 +417,12 @@ $$;
 
 -- =============================================================
 -- report_drill(uuid, text) — file a moderation complaint.
--- One report per user per drill (composite PK). Hits a daily
--- rate-limit counter (rate_limits.reports, 10/day) to keep spam
--- bounded. Auto-flips status to 'flagged' when the report counter
--- crosses 10 — flagged drills disappear from drill_summaries
--- (filtered by status = 'public') so further harm is contained
--- until admin reviews. 10 distinct reporters is a strong enough
--- signal to auto-hide without letting a few throwaway anon accounts
--- censor a drill.
+-- One report per user per drill (composite PK). Auto-flips status to
+-- 'flagged' when the report counter crosses 10 — flagged drills disappear
+-- from drill_summaries (filtered by status = 'public') so further harm is
+-- contained until admin reviews. 10 distinct reporters is a strong enough
+-- signal to auto-hide without letting a few throwaway anon accounts censor
+-- a drill.
 -- =============================================================
 
 create function report_drill(p_drill_id uuid, p_reason text default null)
@@ -420,22 +434,9 @@ as $$
 declare
     v_user_id  uuid := auth.uid();
     v_inserted int;
-    v_reports  int;
 begin
     if v_user_id is null then
         raise exception 'authentication required' using errcode = '42501';
-    end if;
-
-    -- Daily report-rate limit. Atomic insert-then-bump.
-    insert into rate_limits as r (user_id, day, reports)
-    values (v_user_id, current_date, 1)
-    on conflict (user_id, day)
-        do update set reports = r.reports + 1
-    returning r.reports into v_reports;
-
-    if v_reports > 10 then
-        raise exception 'report rate limit exceeded (10/day)'
-            using errcode = 'P0001';
     end if;
 
     -- One report per (drill, user) — quiet conflict is the
@@ -460,33 +461,6 @@ end;
 $$;
 
 -- =============================================================
--- try_record_submission(uuid) — atomic upload rate-limit check.
--- Called by the submit_drill Edge Function (service_role) before it
--- inserts a new drill. Returns the user's current daily upload count
--- AFTER incrementing; the Edge Function rolls back if the count
--- exceeds the limit. Wrapping the check in a function keeps the
--- whole upload path in one transaction.
--- =============================================================
-
-create function try_record_submission(p_user_id uuid)
-returns int
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-    v_uploads int;
-begin
-    insert into rate_limits as r (user_id, day, uploads)
-    values (p_user_id, current_date, 1)
-    on conflict (user_id, day)
-        do update set uploads = r.uploads + 1
-    returning r.uploads into v_uploads;
-    return v_uploads;
-end;
-$$;
-
--- =============================================================
 -- RLS — deny everything to anon/authenticated on `drills`. They
 -- get to the data only through `drill_summaries` (filtered view)
 -- and `get_drill` (SECURITY DEFINER). The Edge Function bypasses
@@ -494,7 +468,6 @@ $$;
 -- =============================================================
 
 alter table drills        enable row level security;
-alter table rate_limits   enable row level security;
 alter table likes         enable row level security;
 
 -- No policies = no rows visible. We intentionally do not grant any.
@@ -503,7 +476,6 @@ alter table likes         enable row level security;
 -- Function/view grants. Revoke defaults first so we know exactly
 -- what's exposed.
 revoke all on drills              from anon, authenticated;
-revoke all on rate_limits         from anon, authenticated;
 revoke all on likes               from anon, authenticated;
 revoke all on drill_summaries     from anon, authenticated;
 
@@ -532,9 +504,6 @@ grant  execute on function delete_my_drill(uuid)
 grant  execute on function report_drill(uuid, text)
                                   to   anon, authenticated;
 
--- try_record_submission is only ever called by the Edge Function
--- (service_role), so we do not grant it to anon/authenticated.
-
 -- =============================================================
 -- Admin dashboard aggregations.
 --
@@ -547,11 +516,12 @@ grant  execute on function report_drill(uuid, text)
 -- keep public roles out entirely.
 -- =============================================================
 
--- admin_daily_stats — per-day metrics for the last 90 days. The
--- generate_series CTE pins the row count to "today minus 90" so gaps in the
--- source tables don't become gaps in the chart. Downloads are summed from
--- rate_limits (one row per user-day); the 90-day cleanup window above keeps
--- this column populated.
+-- admin_daily_stats — per-day metrics for the dashboard chart (uploads /
+-- likes / reports). Reads the frozen daily_stats rollup for completed days
+-- and computes "today" live (today isn't frozen until tonight's run).
+-- Windowed to the last 90 days; daily_stats keeps the full history.
+-- Downloads aren't a daily series — see admin_overview.total_downloads for
+-- the lifetime total.
 create view admin_daily_stats as
 with days as (
     select generate_series(
@@ -560,41 +530,20 @@ with days as (
         interval '1 day'
     )::date as day
 ),
-ups as (
-    select created_at::date as day, count(*)::bigint as n
-    from drills
-    where created_at >= current_date - interval '90 days'
-    group by 1
-),
-liks as (
-    select created_at::date as day, count(*)::bigint as n
-    from likes
-    where created_at >= current_date - interval '90 days'
-    group by 1
-),
-reps as (
-    select created_at::date as day, count(*)::bigint as n
-    from drill_reports
-    where created_at >= current_date - interval '90 days'
-    group by 1
-),
-dls as (
-    select day, sum(downloads)::bigint as n
-    from rate_limits
-    where day >= current_date - interval '90 days'
-    group by day
+today as (
+    select
+        (select count(*)::bigint from drills        where created_at::date = current_date) as uploads,
+        (select count(*)::bigint from likes         where created_at::date = current_date) as likes,
+        (select count(*)::bigint from drill_reports where created_at::date = current_date) as reports
 )
 select
     d.day,
-    coalesce(ups.n,  0) as uploads,
-    coalesce(dls.n,  0) as downloads,
-    coalesce(liks.n, 0) as likes,
-    coalesce(reps.n, 0) as reports
+    case when d.day = current_date then t.uploads else coalesce(s.uploads, 0) end as uploads,
+    case when d.day = current_date then t.likes   else coalesce(s.likes,   0) end as likes,
+    case when d.day = current_date then t.reports else coalesce(s.reports, 0) end as reports
 from days d
-left join ups  on ups.day  = d.day
-left join liks on liks.day = d.day
-left join reps on reps.day = d.day
-left join dls  on dls.day  = d.day
+cross join today t
+left join daily_stats s on s.day = d.day
 order by d.day;
 
 -- admin_character_counts — drill distribution by character, including

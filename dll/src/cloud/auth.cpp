@@ -32,10 +32,9 @@ std::mutex g_mutex;
 Token g_token;
 
 // Signup backoff. After three consecutive failed anonymous signups
-// (typically caused by the per-IP signup rate limit in supabase/
-// config.toml) we stop hammering the endpoint for five minutes.
-// Without this, a user on a flaky network would burn through their
-// hourly quota on the first action and stay locked out for an hour.
+// (typically the signup rate limit) we stop hammering the endpoint for
+// five minutes. Without this, a user on a flaky network would burn
+// through their hourly quota on the first action and stay locked out.
 constexpr int kSignupBackoffFailures = 3;
 constexpr std::chrono::minutes kSignupBackoffWindow{5};
 int g_signup_failures = 0;
@@ -74,9 +73,13 @@ bool apply_auth_response(const std::string& body, Token& out) {
     if (access.empty() || refresh.empty()) return false;
 
     std::string uid;
-    if (j.contains("user") && j["user"].is_object()) { uid = j["user"].value("id", std::string{}); }
+    if (j.contains("user") && j["user"].is_object()) {
+        uid = j["user"].value("id", std::string{});
+    }
     // Refresh tokens carry the user id back too, but only on refresh.
-    if (uid.empty()) { uid = j.value("user_id", std::string{}); }
+    if (uid.empty()) {
+        uid = j.value("user_id", std::string{});
+    }
 
     out.access = std::move(access);
     out.refresh = std::move(refresh);
@@ -91,10 +94,8 @@ bool sign_up_anonymous(Token& out) {
         {"X-OpenDojo-Key", opendojo::cloud::proxy_key()},
         {"Content-Type", "application/json"},
     };
-    // Empty object body — Supabase treats POST /signup with no email
-    // as an anonymous sign-up when the project has anon-auth enabled.
-    // The proxy injects the apikey + anon bearer for this unauthenticated
-    // call.
+    // Empty object body — POST /signup with no email is treated as an
+    // anonymous sign-up.
     auto res = opendojo::cloud::http::post(url, headers, "{}");
     if (res.transport_error) {
         OPENDOJO_LOG("cloud/auth: signup transport error: %s", res.error_message.c_str());

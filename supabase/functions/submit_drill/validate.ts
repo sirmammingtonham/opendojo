@@ -13,7 +13,6 @@
 export const MAX_CONTENT_BYTES   = 64 * 1024;
 export const MAX_BODY_BYTES      = 80 * 1024;
 export const MAX_RECORDINGS      = 8;
-export const MAX_UPLOADS_PER_DAY = 5;
 export const MAX_CATEGORIES      = 5;
 
 // Allowed taxonomy values - mirrors the seed data in

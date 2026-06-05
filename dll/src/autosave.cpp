@@ -411,7 +411,9 @@ void tick() {
                          (cached.detected && cached.cpu_character_id != g_s.prev_character_id);
 
     // Save the OLD state when we leave practice or switch character.
-    if (changed && g_s.prev_detected) { save_for(g_s.prev_character_name); }
+    if (changed && g_s.prev_detected) {
+        save_for(g_s.prev_character_name);
+    }
 
     // Periodic safety-net save while in practice. The exit-practice save
     // above can miss data if the gameplay subsystem clears before we get
@@ -533,7 +535,9 @@ void tick() {
 
     // Only refresh prev_character_name on actual change — saves the per-
     // frame string assignment when the character hasn't moved.
-    if (changed) { g_s.prev_character_name = cached_name ? cached_name : ""; }
+    if (changed) {
+        g_s.prev_character_name = cached_name ? cached_name : "";
+    }
     g_s.prev_character_id = cached.cpu_character_id;
     g_s.prev_detected = cached.detected;
 }
