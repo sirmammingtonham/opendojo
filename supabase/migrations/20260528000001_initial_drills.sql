@@ -212,7 +212,14 @@ alter table drill_reports enable row level security;
 -- =============================================================
 
 create view drill_summaries
-with (security_invoker = true)  -- run as the calling role; RLS still applies
+-- Owner-rights view (security_invoker = false): it runs as the view owner, so
+-- it can read `drills` to build this curated, metadata-only projection without
+-- anon having ANY access to the base table. anon gets SELECT on this view only;
+-- `content` and `uploader_id` never leave it (uploader_id is read solely to
+-- compute is_mine). Direct anon access to `drills` stays closed by RLS + the
+-- revokes below. (A security_invoker view would require granting anon access to
+-- `drills` itself, which would expose content + uploader_id — so it's wrong here.)
+with (security_invoker = false)
 as
 select
     id,

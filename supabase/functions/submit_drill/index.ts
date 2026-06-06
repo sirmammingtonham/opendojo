@@ -1,9 +1,10 @@
 // submit_drill - the ONLY write path into the drills table.
 //
 // Lifecycle:
-//   1. Verify the caller's JWT (handled by Supabase's gateway because
-//      config.toml sets verify_jwt = true). The JWT must come from an
-//      anonymous sign-in - these are the only identities we issue.
+//   1. Verify the caller. config.toml sets verify_jwt = false (publishable
+//      keys aren't JWTs, so gateway JWT verification isn't available), so the
+//      function validates the user's token itself via getUser() below. The
+//      token must come from an anonymous sign-in - the only identities we issue.
 //   2. Decode + validate the JSON payload via `validate()` in
 //      validate.ts. That module is pure-logic and unit-tested.
 //   3. Hash the content (SHA-256, hex). If a row with this hash
@@ -23,9 +24,17 @@ import {
 } from "./validate.ts";
 import { containsBannedLanguage } from "./profanity.ts";
 
-const SUPABASE_URL              = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_ANON_KEY         = Deno.env.get("SUPABASE_ANON_KEY")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+// The function uses one key: the project's SECRET key. It both validates the
+// caller's token (getUser) and does the privileged writes - the drills /
+// user_bans tables deny the public roles via RLS, so service_role access is
+// required. Set it explicitly as a custom function secret (the SUPABASE_*
+// prefix is reserved, so it can't live there); no fallbacks - fail fast if
+// it's missing.
+const SUPABASE_URL        = Deno.env.get("SUPABASE_URL");
+const OPENDOJO_SECRET_KEY = Deno.env.get("OPENDOJO_SECRET_KEY");
+if (!SUPABASE_URL || !OPENDOJO_SECRET_KEY) {
+    throw new Error("submit_drill: SUPABASE_URL and OPENDOJO_SECRET_KEY must be set");
+}
 
 function json(status: number, body: unknown): Response {
     return new Response(JSON.stringify(body), {
@@ -59,18 +68,19 @@ Deno.serve(async (req) => {
         }
     }
 
-    // The gateway already verified the JWT (config.toml: verify_jwt = true),
-    // so by the time we're here the Authorization header has a valid token.
-    // We still need to *decode* it to learn who the user is - re-use a
-    // user-scoped client so .auth.getUser() does that and re-validates.
+    // verify_jwt is off (the gateway apikey isn't a JWT), so the function is
+    // its own auth check. One secret-key client does both jobs: getUser()
+    // validates the caller's token, and the same client does the privileged
+    // writes (the secret key uses service_role, which bypasses RLS).
     const auth = req.headers.get("Authorization");
     if (!auth) return json(401, { error: "missing Authorization" });
+    const token = auth.replace(/^[Bb]earer\s+/, "");
 
-    const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-        global: { headers: { Authorization: auth } },
-        auth:   { persistSession: false },
+    const admin = createClient(SUPABASE_URL, OPENDOJO_SECRET_KEY, {
+        auth: { persistSession: false },
     });
-    const { data: userData, error: userErr } = await userClient.auth.getUser();
+
+    const { data: userData, error: userErr } = await admin.auth.getUser(token);
     if (userErr || !userData.user) {
         return json(401, { error: "invalid token" });
     }
@@ -104,13 +114,6 @@ Deno.serve(async (req) => {
 
     const contentHash = await sha256Hex(drill.content);
     const sizeBytes   = new TextEncoder().encode(drill.content).byteLength;
-
-    // Service-role client for the actual write path. It bypasses RLS,
-    // which is exactly what we want - RLS denies all writes for the
-    // public roles and we are the trusted gate.
-    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-        auth: { persistSession: false },
-    });
 
     // Ban check. A row in user_bans for this uid means the admin
     // panel has flagged them; refuse uploads. We do this before

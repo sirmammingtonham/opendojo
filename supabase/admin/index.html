@@ -6,8 +6,8 @@
 <style>
 /*
  * Self-contained admin panel. Hits Supabase REST endpoints directly
- * with the project's service_role key — that key is full read/write
- * on the database, so this UI is exclusively for the project owner.
+ * with the project's secret key (sb_secret_…) — that key is full
+ * read/write on the database, so this UI is exclusively for the project owner.
  *
  * Open this file in a browser. Most browsers permit fetch() from
  * file:// to https origins; if yours blocks it, run a local server:
@@ -354,9 +354,9 @@ svg.timeseries {
     <section id="config-section">
         <h2>Connect</h2>
         <p>
-            Paste your Supabase URL + <code>service_role</code> key. Both stay in
-            this tab's <code>sessionStorage</code> only — closing the tab wipes them.
-            The service_role key has full DB access; do not share or check this URL anywhere.
+            Paste your Supabase URL + <code>secret</code> key (<code>sb_secret_…</code>).
+            Both stay in this tab's <code>sessionStorage</code> only — closing the tab
+            wipes them. The secret key has full DB access; do not share or check it in anywhere.
         </p>
         <div class="card">
             <div class="row">
@@ -367,8 +367,8 @@ svg.timeseries {
             </div>
             <div class="row">
                 <div class="col" style="flex: 1;">
-                    <label>Service role key</label>
-                    <input id="cfg-key" type="password" placeholder="eyJhbGciOi...">
+                    <label>Secret key</label>
+                    <input id="cfg-key" type="password" placeholder="sb_secret_...">
                 </div>
             </div>
             <div class="row">
@@ -604,13 +604,13 @@ function toast(msg, ok) {
 }
 
 // ====================================================================
-// Supabase REST helpers. service_role key bypasses RLS, so anything
-// in the DB is reachable from here.
+// Supabase REST helpers. The secret key uses the service_role Postgres
+// role and bypasses RLS, so anything in the DB is reachable from here.
+// New-style keys go on the `apikey` header only — never as a Bearer token.
 // ====================================================================
 function headers(extra) {
     return Object.assign({
         'apikey': svcKey,
-        'Authorization': 'Bearer ' + svcKey,
         'Content-Type': 'application/json',
     }, extra || {});
 }

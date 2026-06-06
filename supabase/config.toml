@@ -35,7 +35,10 @@ anonymous_users    = 5
 token_refresh      = 150
 
 [functions.submit_drill]
-verify_jwt = true
+# Publishable API keys aren't JWTs, so the gateway's JWT verification can't be
+# used. The function authorizes the caller itself (validates the user's token
+# via getUser).
+verify_jwt = false
 
 [db]
-major_version = 15
+major_version = 17

@@ -1,9 +1,9 @@
 // opendojo-api — rate-limited request proxy. Deploy with `wrangler deploy`.
 
 export interface Env {
-    SUPABASE_REF:       string;
-    SUPABASE_ANON_KEY:  string;
-    PROXY_KEY:          string;
+    SUPABASE_REF:             string;
+    SUPABASE_PUBLISHABLE_KEY: string;
+    PROXY_KEY:                string;
     RL_SIGNUP:      RateLimit;
     RL_SUBMIT:      RateLimit;
     RL_DOWNLOAD:    RateLimit;
@@ -42,7 +42,7 @@ function safeEqual(a: string, b: string): boolean {
 
 const handler: ExportedHandler<Env> = {
     async fetch(request, env) {
-        if (!env.SUPABASE_REF || !env.SUPABASE_ANON_KEY || !env.PROXY_KEY) {
+        if (!env.SUPABASE_REF || !env.SUPABASE_PUBLISHABLE_KEY || !env.PROXY_KEY) {
             return deny(500, "misconfigured");
         }
 
@@ -71,13 +71,12 @@ const handler: ExportedHandler<Env> = {
         target.pathname = path;
         target.search   = url.search;
 
+        // Publishable key goes on `apikey` only — never as a Bearer token
+        // (it isn't a JWT). A user's Bearer JWT, when present, is left intact.
         const headers = new Headers(request.headers);
         headers.delete("host");
         headers.delete("x-opendojo-key");
-        headers.set("apikey", env.SUPABASE_ANON_KEY);
-        if (!headers.has("authorization")) {
-            headers.set("authorization", `Bearer ${env.SUPABASE_ANON_KEY}`);
-        }
+        headers.set("apikey", env.SUPABASE_PUBLISHABLE_KEY);
 
         return fetch(target, {
             method: request.method,
