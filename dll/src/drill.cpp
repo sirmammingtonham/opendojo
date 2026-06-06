@@ -10,6 +10,12 @@ namespace opendojo::drill {
 
 namespace {
 
+// Max events that fit in one fixed-size slot. The slot is SLOT_PITCH bytes:
+// a 2-byte event-count header followed by 4 bytes per event. A recording with
+// more events than this would overflow the fixed slot buffer, so the decoder
+// rejects it (and pack_events clamps to it defensively).
+constexpr std::size_t MAX_EVENTS = (SLOT_PITCH - 2) / 4;
+
 // ---- Event-level encoding --------------------------------------------------
 
 constexpr std::uint8_t DEFAULT_MARK = 0x2;
@@ -338,10 +344,14 @@ void encode_recording(std::string& out, const Recording& r, std::size_t idx_one_
 // Build the SLOT_PITCH-byte payload from an in-memory event list.
 std::vector<std::uint8_t> pack_events(const std::vector<std::array<std::uint8_t, 4>>& events) {
     std::vector<std::uint8_t> out(SLOT_PITCH, 0);
-    const auto cnt = static_cast<std::uint16_t>(events.size());
+    // Never write more than the slot can hold. decode_text rejects oversize
+    // recordings before reaching here, but clamp regardless so a future caller
+    // can't turn an oversize event list into an out-of-bounds heap write.
+    const std::size_t n = std::min(events.size(), MAX_EVENTS);
+    const auto cnt = static_cast<std::uint16_t>(n);
     out[0] = static_cast<std::uint8_t>(cnt & 0xFF);
     out[1] = static_cast<std::uint8_t>((cnt >> 8) & 0xFF);
-    for (std::size_t i = 0; i < events.size(); ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
         const std::size_t off = 2 + i * 4;
         out[off] = events[i][0];
         out[off + 1] = events[i][1];
@@ -538,6 +548,20 @@ TextResult decode_text(std::string_view text) {
                 std::array<std::uint8_t, 4> ev{};
                 if (!decode_event_line(line, ev, result.error)) return result;
                 events.push_back(ev);
+                // Bound the event list as it grows. flush_recording() packs it
+                // into a fixed SLOT_PITCH buffer; catching the overflow here —
+                // before the next flush — keeps a malicious drill from writing
+                // past that buffer. (The post-parse cap check below is now a
+                // backstop for the same invariant.)
+                if (events.size() > MAX_EVENTS) {
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf),
+                                  "recording %zu has more than %zu events",
+                                  result.drill.recordings.size() + 1, MAX_EVENTS);
+                    result.error = buf;
+                    result.drill.recordings.clear();
+                    return result;
+                }
             }
         }
     }
@@ -548,7 +572,6 @@ TextResult decode_text(std::string_view text) {
         return result;
     }
 
-    constexpr std::size_t MAX_EVENTS = (SLOT_PITCH - 2) / 4;
     for (std::size_t i = 0; i < result.drill.recordings.size(); ++i) {
         if (result.drill.recordings[i].event_count > MAX_EVENTS) {
             char buf[128];

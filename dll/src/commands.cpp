@@ -38,11 +38,19 @@ bool ensure_drills_dir() {
     return !ec;
 }
 
+// Upper bound on a drill file we'll load into memory. The cloud caps uploaded
+// content at 64 KB; a fully-packed local export (8 slots * MAX_EVENTS events *
+// ~128 bytes/line) is under 2 MB, so 4 MB comfortably fits any legitimate
+// drill while refusing a file crafted to exhaust memory. The decoder's
+// per-recording event cap is the real overflow guard; this just bounds I/O.
+constexpr std::uintmax_t MAX_DRILL_FILE_BYTES = 4u * 1024u * 1024u;
+
 std::string read_whole_file(const std::filesystem::path& p) {
     std::ifstream f(p, std::ios::binary);
     if (!f) return {};
     f.seekg(0, std::ios::end);
     auto size = f.tellg();
+    if (size < 0 || static_cast<std::uintmax_t>(size) > MAX_DRILL_FILE_BYTES) return {};
     f.seekg(0);
     std::string out(static_cast<std::size_t>(size), '\0');
     f.read(out.data(), out.size());

@@ -68,6 +68,31 @@ export function hasForbiddenChar(s: string, allowTabLf: boolean): boolean {
 export const MAX_CONTENT_LINES    = 8192;
 export const MAX_CONTENT_LINE_LEN = 512;
 
+// Per-recording event-line cap. On the client each recording's event lines
+// are packed into one fixed slot of SLOT_PITCH (0x1C22 = 7202) bytes: a 2-byte
+// count header + 4 bytes per event, so the slot holds at most
+// (7202 - 2) / 4 = 1800 events. A recording carrying more would overflow that
+// fixed buffer on every client that loads the drill, so reject it here — the
+// MAX_CONTENT_LINES cap alone doesn't stop it (8192 lines is enough to put
+// well over 1800 event lines in a single recording).
+export const MAX_RECORDING_EVENTS = 1800;
+
+// Classify one drill line the same way the client decoder does, so the
+// server's event-line count matches what the client will actually pack.
+// Comments (from the first '#') are stripped and surrounding whitespace
+// trimmed before classifying.
+function classifyLine(raw: string): "blank" | "marker" | "header" | "event" {
+    const hash = raw.indexOf("#");
+    const line = (hash >= 0 ? raw.slice(0, hash) : raw).trim();
+    if (line.length === 0)      return "blank";
+    if (line.startsWith("---")) return "marker";
+    const colon = line.indexOf(":");
+    if (colon > 0 && /^[A-Za-z0-9_]+$/.test(line.slice(0, colon).trim())) {
+        return "header";
+    }
+    return "event";
+}
+
 export interface SubmitBody {
     name?: unknown;
     description?: unknown;
@@ -167,6 +192,26 @@ export function drillShapeError(content: string, declared: number): string | nul
         const m = markers[i].match(/(\d+)/)!;
         if (parseInt(m[1], 10) !== i + 1) {
             return "recording markers must be numbered 1..N in order";
+        }
+    }
+
+    // Per-recording event-line cap. Walk the body, resetting the count at each
+    // recording marker, and reject the moment a single recording exceeds what
+    // the client's fixed slot can hold. Event lines only exist inside a
+    // recording section (before the first marker is the drill header).
+    let inRecording = false;
+    let recIdx = 0;
+    let eventsInRec = 0;
+    for (const rawLine of content.split("\n")) {
+        const kind = classifyLine(rawLine);
+        if (kind === "marker") {
+            inRecording = true;
+            ++recIdx;
+            eventsInRec = 0;
+        } else if (kind === "event" && inRecording) {
+            if (++eventsInRec > MAX_RECORDING_EVENTS) {
+                return `recording ${recIdx} has more than ${MAX_RECORDING_EVENTS} events`;
+            }
         }
     }
     return null;

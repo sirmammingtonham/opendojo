@@ -21,6 +21,7 @@ import {
     hasForbiddenChar,
     MAX_CONTENT_LINE_LEN,
     MAX_CONTENT_LINES,
+    MAX_RECORDING_EVENTS,
     normalizeLineEndings,
     type SubmitBody,
     validate,
@@ -274,6 +275,43 @@ Deno.test("content: too many lines rejected", () => {
               "\n".repeat(MAX_CONTENT_LINES + 1) +
               "--- recording 1\n";
     expectErr(body({ content: c }), "more than");
+});
+
+// ---- per-recording event cap -----------------------------------------------
+
+// One recording carrying `k` event lines. Each is a short, well-formed event
+// ("dir buttons frames"); the server only counts them, it doesn't grammar-check.
+function drillWithEvents(k: number, recordings = 1): string {
+    let c = "# OpenDojo drill\nrecordings: " + recordings + "\n\n";
+    for (let r = 1; r <= recordings; ++r) {
+        c += "--- recording " + r + "\n";
+        for (let i = 0; i < k; ++i) c += "f 1 10\n";
+    }
+    return c;
+}
+
+Deno.test("content: recording at the event cap is accepted", () => {
+    const c = drillWithEvents(MAX_RECORDING_EVENTS);
+    expectOk(body({ recordings_count: 1, content: c }));
+});
+
+Deno.test("content: recording over the event cap rejected", () => {
+    const c = drillWithEvents(MAX_RECORDING_EVENTS + 1);
+    expectErr(body({ recordings_count: 1, content: c }), "more than");
+});
+
+Deno.test("content: event cap is per-recording, not total", () => {
+    // Two recordings each at the cap: total events exceed the cap but no
+    // single recording does, so this must pass.
+    const c = drillWithEvents(MAX_RECORDING_EVENTS, 2);
+    expectOk(body({ recordings_count: 2, content: c }));
+});
+
+Deno.test("content: comment + blank lines don't count toward the event cap", () => {
+    // At the cap, then padded with comments/blanks that classify as non-events.
+    let c = drillWithEvents(MAX_RECORDING_EVENTS);
+    c += "# a comment\n\n# another\n";
+    expectOk(body({ recordings_count: 1, content: c }));
 });
 
 // ---- categories ------------------------------------------------------------
