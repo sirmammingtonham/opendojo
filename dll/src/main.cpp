@@ -10,8 +10,8 @@
 // The init thread:
 //   - Logs module base and subsystem-resolution sanity, then
 //   - Kicks off the render hook (which itself spawns another thread that
-//     waits for the game's D3D12 runtime to be loaded before patching
-//     vtables and standing up the ImGui overlay).
+//     waits for the game's D3D12 runtime to be loaded before installing
+//     the render detours and standing up the ImGui overlay).
 
 #include <windows.h>
 
@@ -62,9 +62,8 @@ void init_thread() {
 
     opendojo::render_hook::install();
 
-    // Practice-mode lifecycle hooks. Replaces what was previously a
-    // per-frame "are we in practice?" subsystem lookup with two
-    // event-driven hooks (controller ctor + dtor). See practice_state.hpp.
+    // Practice-mode lifecycle: a controller-dtor detour for exit-flush;
+    // entry is detected by slot polling. See practice_state.hpp.
     opendojo::practice_state::install_hooks();
 
     // Player-pointer refresh hook. Replaces per-frame detect_cpu chain

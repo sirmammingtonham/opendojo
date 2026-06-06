@@ -2,35 +2,29 @@
 
 // Practice-mode lifecycle tracking.
 //
-// Instead of polling the gameplay subsystem every frame to detect when
-// the user enters/leaves practice mode (which is fragile and runs work
-// outside practice for nothing), we hook the two Tekken functions that
-// allocate / destruct the practice-mode controller singleton:
+// Entry: is_active() polls the practice-controller singleton slot
+// (signatures::practice_slot_addr()). The slot is non-null only in
+// Practice/Training/Replay, so it also gates the menu.
 //
-//   FUN_145CA3870 (RVA 0x05CA3870)  — practice controller factory.
-//       Allocates the 0xD0-byte controller, calls its ctor (which
-//       writes the singleton slot at module+0x9B79290), returns the
-//       new instance. Single allocation path → fires exactly once per
-//       practice session entry.
-//
-//   FUN_145C8C2F0 (RVA 0x05C8C2F0)  — controller derived destructor.
-//       Clears the singleton slot (write at 0x145C8C349) before
-//       tearing down sub-objects and operator delete. Hooking AT THE
-//       ENTRY means our code runs while gameplay subsystems are still
-//       live — perfect for "save before exit" semantics.
+// Exit: one MinHook detour on the controller's scalar-deleting dtor
+// (signatures::practice_dtor()). It runs while gameplay subsystems are
+// still live, so we flush autosave there before the slot data is gone.
+// Not the battle/round dtor FUN_145C8C2F0 — that misses practice→
+// main-menu and fires on in-practice character switch (where flushing
+// crashes mid-teardown). See practice_state.cpp.
 //
 // See docs/RE_NOTES.md for the RE walk that justified these targets.
 
 namespace opendojo::practice_state {
 
-// True while the user is in practice mode. Driven by the lifecycle
-// hooks above; flips on the controller ctor return and on the dtor
-// entry. Single atomic load — cheap to call per frame.
+// True while in practice. Polls the practice slot each call and fires a
+// side effect on each transition: 0→nonzero notifies autosave (new
+// session), nonzero→0 invalidates the player_hook cache. Cheap per frame.
 bool is_active();
 
-// Install the two MinHook detours. Idempotent. Call once at DLL init
-// after the polaris base is known. MinHook is initialized internally
-// (the call is also idempotent across the codebase).
+// Install the practice-dtor MinHook detour (exit-flush; entry is
+// poll-based, no hook). Idempotent. Call once at DLL init after the
+// polaris base is known. MinHook is initialized internally.
 void install_hooks();
 
 }  // namespace opendojo::practice_state

@@ -44,8 +44,8 @@ void tick();
 // we're not in a match, or if no character is known.
 void flush_now();
 
-// Called by the practice_state factory hook right after the practice
-// controller is allocated. Clears stale prev-tick state so the
+// Called from practice_state::is_active() on the practice-slot 0→nonzero
+// transition (practice entry). Clears stale prev-tick state so the
 // upcoming character is detected as a fresh entry and the normal
 // autoload flow (round-active wait → load_drill) kicks off.
 void on_practice_entered();

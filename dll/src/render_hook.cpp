@@ -92,22 +92,6 @@ HANDLE g_fence_event = nullptr;
 UINT64 g_fence_next = 0;
 
 // ===========================================================================
-//  Vtable utilities
-// ===========================================================================
-
-void* hook_vtable_entry(void** vtable, std::size_t index, void* new_fn) {
-    DWORD old_protect = 0;
-    if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_EXECUTE_READWRITE, &old_protect)) {
-        return nullptr;
-    }
-    void* original = vtable[index];
-    vtable[index] = new_fn;
-    DWORD tmp = 0;
-    VirtualProtect(&vtable[index], sizeof(void*), old_protect, &tmp);
-    return original;
-}
-
-// ===========================================================================
 //  WndProc subclass (input routing)
 // ===========================================================================
 //
@@ -945,9 +929,10 @@ bool do_install() {
         return false;
     }
 
-    // COM vtables are class-shared in this process: swapping vtable[N] on
-    // the dummy object hooks every IDXGISwapChain / ID3D12CommandQueue
-    // instance in this process — including the ones the game already created.
+    // COM vtables are class-shared in this process, so the dummy object's
+    // vtable yields the same Present / ExecuteCommandLists addresses the
+    // game's real objects use. We read the addresses here and detour them
+    // below; the vtable itself is left untouched.
     void** swapchain_vt = *reinterpret_cast<void***>(sc1);
     void** queue_vt = *reinterpret_cast<void***>(queue);
 
@@ -960,7 +945,8 @@ bool do_install() {
     // frames. The dummy swapchain/queue just serves as a vehicle for
     // resolving the real function addresses; once we have those, we
     // don't need the dummy anymore.
-    if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
+    MH_STATUS init = MH_Initialize();
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
         OPENDOJO_LOG("render_hook: MH_Initialize failed");
         cleanup();
         return false;
