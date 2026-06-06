@@ -682,7 +682,13 @@ void draw_about_tab() {
                 vk_name(opendojo::config::toggle_vk()).c_str(),
                 pad_btn_name(opendojo::config::toggle_pad_btn()));
     ImGui::Spacing();
-    ImGui::TextDisabled("Drill files + config live in opendojo/ next to the game executable.");
+    ImGui::TextDisabled("Drill files + settings live in opendojo/ next to the game executable.");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped(
+        "Your cloud identity is stored in %%LOCALAPPDATA%%\\OpenDojo and is tied to this "
+        "computer. It survives game updates and reinstalls, but won't carry over to another "
+        "PC.");
+    ImGui::PopStyleColor();
 }
 
 // ---- Toast (transient bottom-of-window status line) ------------------------

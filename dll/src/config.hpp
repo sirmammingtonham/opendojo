@@ -3,15 +3,20 @@
 #include <cstdint>
 #include <string>
 
-// All persistent state lives in opendojo/config.json. This module
-// owns the single source of truth — bind preferences, cloud auth
-// tokens, and the author handle all flow through here. Other modules
-// (handle.cpp, auth.cpp) delegate their persistence to the accessors
-// below.
+// This module owns all persistent state, split across two files:
+//   * Settings — opendojo/config.json, beside the game executable:
+//     bind preferences and the author handle.
+//   * Upload identity — %LOCALAPPDATA%\OpenDojo\identity.json: the
+//     anonymous auth bundle (access/refresh tokens + user id). It lives
+//     in AppData so it survives a game update or reinstall, which wipes
+//     the game-dir folder; losing it would orphan a user's uploads.
+// Other modules (handle.cpp, auth.cpp) delegate persistence to the
+// accessors below.
 //
-// On first load() we also migrate state from the older split files
-// (opendojo/cloud.json, opendojo/handle.txt) into config.json and
-// delete the originals.
+// On first load() we migrate older layouts forward: the auth bundle from
+// an embedded config.json `cloud.auth` object or the even-older
+// opendojo/cloud.json moves to identity.json; opendojo/handle.txt moves
+// to the author handle. Stale copies are deleted.
 
 namespace opendojo::config {
 
