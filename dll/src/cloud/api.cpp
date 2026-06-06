@@ -53,21 +53,6 @@ std::string url_encode(std::string_view in) {
     return out;
 }
 
-// Sniff a server-side error message out of a non-2xx body. Both
-// PostgREST and our Edge Function return JSON with either a
-// `message` or `error` key; fall back to the raw body.
-std::string extract_error(const std::string& body) {
-    auto j = json::parse(body, nullptr, false);
-    if (j.is_object()) {
-        if (j.contains("error") && j["error"].is_string()) return j["error"];
-        if (j.contains("message") && j["message"].is_string()) return j["message"];
-        if (j.contains("hint") && j["hint"].is_string()) return j["hint"];
-    }
-    if (body.empty()) return "(no detail)";
-    if (body.size() > 200) return body.substr(0, 200) + "...";
-    return body;
-}
-
 // Case-insensitive substring search. Used to detect Supabase's
 // "Project is paused / unhealthy" 503 body without caring about
 // exact phrasing or capitalization.
@@ -78,52 +63,63 @@ bool body_contains_ci(const std::string& body, const char* needle) {
     return it != body.end();
 }
 
-// Single classification path for every API call's response. Detects
-// transport failures, rate-limit responses (429 or PostgREST's
-// 400-with-rate-limit-body), and Supabase-paused 503s — and assembles
-// the user-facing message. Returns failed=false for 2xx.
+// Single classification path for every API call's response. Maps failures to
+// clean, user-facing messages and NEVER surfaces raw server text (status
+// codes, Postgres messages/hints, raw bodies) — those go only to the local
+// log. `trust_body` is set on the upload path, where the Edge Function returns
+// its own safe, user-facing copy (validation / profanity / ban) we do want to
+// show. `verb` is a short action phrase, e.g. "load drills".
 struct FailureInfo {
     bool failed = false;
     std::string message;
     bool rate_limited = false;
 };
 
-FailureInfo classify_http_failure(const opendojo::cloud::http::Response& res, const char* verb) {
+FailureInfo classify_http_failure(const opendojo::cloud::http::Response& res, const char* verb,
+                                  bool trust_body = false) {
     FailureInfo f;
     if (res.transport_error) {
         f.failed = true;
-        f.message = "couldn't reach OpenDojo Cloud";
+        f.message = "Couldn't reach OpenDojo Cloud. Check your connection and try again.";
         return f;
     }
     if (res.status >= 200 && res.status < 300) return f;
 
-    // Rate limited — server returns 429 directly, or PostgREST
-    // surfaces our plpgsql RAISE as a 400 with "rate limit" in the
-    // message. Both go through the same UI path.
-    if (res.status == 429 || (res.status == 400 && body_contains_ci(res.body, "rate limit"))) {
-        f.failed = true;
+    f.failed = true;
+    // The raw response is for local diagnostics only — never shown to the user.
+    OPENDOJO_LOG("cloud/api: %s HTTP %ld %s", verb, res.status, res.body.c_str());
+
+    if (res.status == 429) {
         f.rate_limited = true;
-        f.message = "Daily limit reached — try again tomorrow.";
+        f.message = "Rate limit reached. Try again in a moment.";
         return f;
     }
 
-    // Supabase free-tier auto-pauses after 7 days of inactivity. The
-    // first request hits a 503 with a body that mentions "paused" or
-    // "unhealthy"; the project resumes automatically and is back in
-    // ~30s. Show a non-scary message that hints at the wait.
+    // Supabase free-tier auto-pauses after inactivity; the first hit is a 503
+    // mentioning "paused"/"unhealthy" and the project is back in ~30s.
     if (res.status == 503 || body_contains_ci(res.body, "paused") ||
         body_contains_ci(res.body, "unhealthy")) {
-        f.failed = true;
-        f.message = "OpenDojo Cloud is starting up — try again in a few seconds.";
+        f.message = "OpenDojo Cloud is temporarily unavailable. Try again shortly.";
         return f;
     }
 
-    // Generic failure — log the raw response for diagnostics and
-    // surface whatever the server told us, prefixed by the verb so
-    // the user knows which action errored.
-    f.failed = true;
-    f.message = std::string(verb) + " failed: " + extract_error(res.body);
-    OPENDOJO_LOG("cloud/api: %s HTTP %ld %s", verb, res.status, res.body.c_str());
+    // Upload path only: the Edge Function returns safe, user-facing copy in
+    // `error` (it logs DB details server-side and returns "internal error" for
+    // those), so we surface it. Read ONLY `error` — never `message`/`hint`.
+    if (trust_body) {
+        auto j = json::parse(res.body, nullptr, false);
+        if (j.is_object() && j.contains("error") && j["error"].is_string()) {
+            f.message = j["error"].get<std::string>();
+            return f;
+        }
+    }
+
+    if (res.status == 401 || res.status == 403) {
+        f.message = "Authorization failed. Try again in a moment.";
+        return f;
+    }
+
+    f.message = std::string("Couldn't ") + verb + ". Please try again.";
     return f;
 }
 
@@ -158,7 +154,7 @@ DrillSummary parse_summary(const json& row) {
 ListResult list_drills(const ListQuery& q) {
     ListResult out;
     if (!opendojo::cloud::auth::ensure_valid()) {
-        out.error_message = "couldn't reach OpenDojo Cloud (auth)";
+        out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
         return out;
     }
 
@@ -198,7 +194,7 @@ ListResult list_drills(const ListQuery& q) {
     url << "&limit=" << limit << "&offset=" << offset;
 
     auto res = opendojo::cloud::http::get(url.str(), standard_headers());
-    if (auto fail = classify_http_failure(res, "list"); fail.failed) {
+    if (auto fail = classify_http_failure(res, "load drills"); fail.failed) {
         out.error_message = std::move(fail.message);
         return out;
     }
@@ -218,7 +214,7 @@ ListResult list_drills(const ListQuery& q) {
 GetResult get_drill(const std::string& id) {
     GetResult out;
     if (!opendojo::cloud::auth::ensure_valid()) {
-        out.error_message = "couldn't reach OpenDojo Cloud (auth)";
+        out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
         return out;
     }
 
@@ -227,7 +223,7 @@ GetResult get_drill(const std::string& id) {
     body["p_drill_id"] = id;
 
     auto res = opendojo::cloud::http::post(url, standard_headers(), body.dump());
-    if (auto fail = classify_http_failure(res, "download"); fail.failed) {
+    if (auto fail = classify_http_failure(res, "download that drill"); fail.failed) {
         out.error_message = std::move(fail.message);
         out.rate_limited = fail.rate_limited;
         return out;
@@ -256,7 +252,7 @@ GetResult get_drill(const std::string& id) {
 SubmitResult submit_drill(const SubmitArgs& a) {
     SubmitResult out;
     if (!opendojo::cloud::auth::ensure_valid()) {
-        out.error_message = "couldn't reach OpenDojo Cloud (auth)";
+        out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
         return out;
     }
 
@@ -274,7 +270,8 @@ SubmitResult submit_drill(const SubmitArgs& a) {
     if (!a.game_version.empty()) body["game_version"] = a.game_version;
 
     auto res = opendojo::cloud::http::post(url, standard_headers(), body.dump());
-    if (auto fail = classify_http_failure(res, "upload"); fail.failed) {
+    if (auto fail = classify_http_failure(res, "upload your drill", /*trust_body=*/true);
+        fail.failed) {
         out.error_message = std::move(fail.message);
         out.rate_limited = fail.rate_limited;
         return out;
@@ -295,7 +292,7 @@ SubmitResult submit_drill(const SubmitArgs& a) {
 LikeResult toggle_like(const std::string& drill_id) {
     LikeResult out;
     if (!opendojo::cloud::auth::ensure_valid()) {
-        out.error_message = "couldn't reach OpenDojo Cloud (auth)";
+        out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
         return out;
     }
 
@@ -307,7 +304,7 @@ LikeResult toggle_like(const std::string& drill_id) {
     // Ask for a "Prefer: return=representation" minimal response shape.
     auto headers = standard_headers();
     auto res = opendojo::cloud::http::post(url, headers, body.dump());
-    if (auto fail = classify_http_failure(res, "like"); fail.failed) {
+    if (auto fail = classify_http_failure(res, "save your like"); fail.failed) {
         out.error_message = std::move(fail.message);
         return out;
     }
@@ -329,7 +326,7 @@ LikeResult toggle_like(const std::string& drill_id) {
 DeleteResult delete_my_drill(const std::string& drill_id) {
     DeleteResult out;
     if (!opendojo::cloud::auth::ensure_valid()) {
-        out.error_message = "couldn't reach OpenDojo Cloud (auth)";
+        out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
         return out;
     }
 
@@ -338,7 +335,7 @@ DeleteResult delete_my_drill(const std::string& drill_id) {
     body["p_drill_id"] = drill_id;
 
     auto res = opendojo::cloud::http::post(url, standard_headers(), body.dump());
-    if (auto fail = classify_http_failure(res, "delete"); fail.failed) {
+    if (auto fail = classify_http_failure(res, "delete that drill"); fail.failed) {
         out.error_message = std::move(fail.message);
         return out;
     }
@@ -360,7 +357,7 @@ DeleteResult delete_my_drill(const std::string& drill_id) {
 ReportResult report_drill(const std::string& drill_id, const std::string& reason) {
     ReportResult out;
     if (!opendojo::cloud::auth::ensure_valid()) {
-        out.error_message = "couldn't reach OpenDojo Cloud (auth)";
+        out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
         return out;
     }
 
@@ -370,7 +367,7 @@ ReportResult report_drill(const std::string& drill_id, const std::string& reason
     if (!reason.empty()) body["p_reason"] = reason;
 
     auto res = opendojo::cloud::http::post(url, standard_headers(), body.dump());
-    if (auto fail = classify_http_failure(res, "report"); fail.failed) {
+    if (auto fail = classify_http_failure(res, "submit your report"); fail.failed) {
         out.error_message = std::move(fail.message);
         return out;
     }

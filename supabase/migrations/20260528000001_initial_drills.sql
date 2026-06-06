@@ -165,7 +165,7 @@ create index likes_drill_idx on likes (drill_id);
 -- goal is to stop new harmful content, not nuke the account.
 --
 -- Only the service_role role can read/write this table — the
--- admin panel hits it directly with the service_role key. The
+-- admin panel hits it directly with the secret key. The
 -- Edge Function consults it via its service-role client.
 -- =============================================================
 
@@ -203,7 +203,7 @@ alter table drill_reports enable row level security;
 -- No client policies; service_role bypasses RLS for the admin panel.
 -- No policies and no grants to anon/authenticated — service_role
 -- bypasses RLS, so the admin panel works while clients can't touch
--- the table even with the anon key.
+-- the table even with the publishable key.
 
 -- =============================================================
 -- drill_summaries view — the ONLY shape anon/authenticated can list.
@@ -471,7 +471,7 @@ $$;
 -- RLS — deny everything to anon/authenticated on `drills`. They
 -- get to the data only through `drill_summaries` (filtered view)
 -- and `get_drill` (SECURITY DEFINER). The Edge Function bypasses
--- RLS by virtue of using the service_role key.
+-- RLS by virtue of using the secret key.
 -- =============================================================
 
 alter table drills        enable row level security;
@@ -515,7 +515,7 @@ grant  execute on function report_drill(uuid, text)
 -- Admin dashboard aggregations.
 --
 -- These views are read-only and exposed ONLY to service_role (the admin
--- panel hits them with the service_role key, which bypasses RLS). We
+-- panel hits them with the secret key, which bypasses RLS). We
 -- explicitly revoke anon/authenticated so an "expose all tables" default
 -- in Supabase can't let the public query them. They're owned by `postgres`
 -- and run as the owner (not security_invoker) so underlying-table RLS

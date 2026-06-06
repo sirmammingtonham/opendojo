@@ -108,7 +108,7 @@ Deno.serve(async (req) => {
     ) {
         return json(400, {
             error:
-                "Name, description, and author handle must not contain profanity or hate speech.",
+                "That name or description isn't allowed..",
         });
     }
 
