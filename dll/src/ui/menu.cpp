@@ -1,4 +1,4 @@
-#include "menu.hpp"
+#include "ui/menu.hpp"
 
 #include "imgui.h"
 
@@ -17,10 +17,10 @@
 #include "config.hpp"
 #include "log.hpp"
 #include "players.hpp"
-#include "render_hook.hpp"
+#include "hooks/render_hook.hpp"
 #include "slot.hpp"
 #include "subsystems.hpp"
-#include "theme.hpp"
+#include "ui/theme.hpp"
 
 #include <windows.h>
 
@@ -138,9 +138,7 @@ void drain_pending_ui_ops() {
         std::lock_guard lk(g_pending.mtx);
         toasts.swap(g_pending.toasts);
     }
-    if (g_pending.drills_dirty.exchange(false)) {
-        g_state.drills_dirty = true;
-    }
+    if (g_pending.drills_dirty.exchange(false)) { g_state.drills_dirty = true; }
     // If multiple toasts queued, the last one wins — that matches the
     // single-slot toast UI we already have.
     for (auto& t : toasts) {
@@ -395,9 +393,7 @@ void draw_drills_tab() {
             "Other people's copies are unaffected. This can't be undone.");
         ImGui::Spacing();
 
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            ImGui::CloseCurrentPopup();
-        }
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
         if (destructive_button("Delete", ImVec2(120, 0))) {
             auto r = opendojo::commands::delete_drill(g_state.delete_path);
@@ -547,9 +543,7 @@ std::string vk_name(std::uint32_t vk) {
         case VK_UP:
         case VK_DOWN: lparam |= (1 << 24); break;
     }
-    if (GetKeyNameTextA(lparam, buf, sizeof(buf)) > 0 && buf[0]) {
-        return buf;
-    }
+    if (GetKeyNameTextA(lparam, buf, sizeof(buf)) > 0 && buf[0]) { return buf; }
     std::snprintf(buf, sizeof(buf), "VK 0x%02X", vk);
     return buf;
 }
@@ -616,9 +610,7 @@ void draw_settings_tab() {
         ImGui::TextColored(ImVec4(0.55f, 0.95f, 0.65f, 1), "%s", vk_name(vk).c_str());
         ImGui::Spacing();
         if (!capturing) {
-            if (ImGui::Button("Rebind...##kbd")) {
-                opendojo::config::start_capture();
-            }
+            if (ImGui::Button("Rebind...##kbd")) { opendojo::config::start_capture(); }
             ImGui::SameLine();
             if (ImGui::Button("Reset##kbd")) {
                 opendojo::config::set_toggle_vk(VK_F12);
@@ -641,9 +633,7 @@ void draw_settings_tab() {
         ImGui::TextColored(ImVec4(0.55f, 0.95f, 0.65f, 1), "Back + %s", pad_btn_name(pad_btn));
         ImGui::Spacing();
         if (!pad_capturing) {
-            if (ImGui::Button("Rebind...##pad")) {
-                opendojo::config::start_pad_capture();
-            }
+            if (ImGui::Button("Rebind...##pad")) { opendojo::config::start_pad_capture(); }
             ImGui::SameLine();
             if (ImGui::Button("Reset##pad")) {
                 opendojo::config::set_toggle_pad_btn(0x8000);  // XINPUT_GAMEPAD_Y

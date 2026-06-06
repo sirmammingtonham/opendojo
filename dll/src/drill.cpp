@@ -315,9 +315,7 @@ void encode_recording(std::string& out, const Recording& r, std::size_t idx_one_
     std::snprintf(hdr, sizeof(hdr), "name:         %s\n", r.name.c_str());
     out += hdr;
     // Only emit `kind:` for non-live; old files implicitly mean live.
-    if (r.kind != Kind::Live) {
-        out += "kind:         movelist\n";
-    }
+    if (r.kind != Kind::Live) { out += "kind:         movelist\n"; }
 
     if (r.kind == Kind::MoveList) {
         // Movelist entries are just a move ID — no per-frame events.
@@ -555,8 +553,7 @@ TextResult decode_text(std::string_view text) {
                 // backstop for the same invariant.)
                 if (events.size() > MAX_EVENTS) {
                     char buf[128];
-                    std::snprintf(buf, sizeof(buf),
-                                  "recording %zu has more than %zu events",
+                    std::snprintf(buf, sizeof(buf), "recording %zu has more than %zu events",
                                   result.drill.recordings.size() + 1, MAX_EVENTS);
                     result.error = buf;
                     result.drill.recordings.clear();

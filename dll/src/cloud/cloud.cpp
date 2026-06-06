@@ -1,4 +1,4 @@
-#include "cloud.hpp"
+#include "cloud/cloud.hpp"
 
 #ifndef OPENDOJO_CLOUD_URL
 #define OPENDOJO_CLOUD_URL ""

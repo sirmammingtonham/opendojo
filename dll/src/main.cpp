@@ -21,10 +21,10 @@
 #include "config.hpp"
 #include "log.hpp"
 #include "memory.hpp"
-#include "player_hook.hpp"
+#include "hooks/player_hook.hpp"
+#include "hooks/proxy.hpp"
+#include "hooks/render_hook.hpp"
 #include "practice_state.hpp"
-#include "proxy.hpp"
-#include "render_hook.hpp"
 #include "signatures.hpp"
 #include "subsystems.hpp"
 

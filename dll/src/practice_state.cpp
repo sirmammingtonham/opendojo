@@ -9,7 +9,7 @@
 #include "autosave.hpp"
 #include "log.hpp"
 #include "memory.hpp"
-#include "player_hook.hpp"
+#include "hooks/player_hook.hpp"
 #include "signatures.hpp"
 
 namespace opendojo::practice_state {

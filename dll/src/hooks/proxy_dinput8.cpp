@@ -27,9 +27,9 @@
 
 #include "MinHook.h"
 
-#include "proxy.hpp"
+#include "hooks/proxy.hpp"
+#include "hooks/render_hook.hpp"
 #include "log.hpp"
-#include "render_hook.hpp"
 
 namespace {
 

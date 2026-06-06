@@ -1,4 +1,4 @@
-#include "worker.hpp"
+#include "cloud/worker.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -6,7 +6,7 @@
 #include <mutex>
 #include <thread>
 
-#include "../log.hpp"
+#include "log.hpp"
 
 namespace opendojo::cloud::worker {
 
@@ -34,9 +34,7 @@ void run() {
             job();
         } catch (const std::exception& e) {
             OPENDOJO_LOG("cloud/worker: job threw: %s", e.what());
-        } catch (...) {
-            OPENDOJO_LOG("cloud/worker: job threw non-std exception");
-        }
+        } catch (...) { OPENDOJO_LOG("cloud/worker: job threw non-std exception"); }
     }
     OPENDOJO_LOG("cloud/worker: thread exiting");
 }

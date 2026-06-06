@@ -1,10 +1,10 @@
-#include "handle.hpp"
+#include "cloud/handle.hpp"
 
 #include <string>
 
-#include "../config.hpp"
-#include "../log.hpp"
-#include "../players.hpp"
+#include "config.hpp"
+#include "log.hpp"
+#include "players.hpp"
 
 namespace opendojo::cloud::handle {
 

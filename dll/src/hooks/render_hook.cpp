@@ -1,4 +1,4 @@
-#include "render_hook.hpp"
+#include "hooks/render_hook.hpp"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -28,9 +28,9 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 #include "autosave.hpp"
 #include "config.hpp"
 #include "log.hpp"
-#include "menu.hpp"
 #include "subsystems.hpp"
-#include "theme.hpp"
+#include "ui/menu.hpp"
+#include "ui/theme.hpp"
 
 namespace opendojo::render_hook {
 
@@ -114,9 +114,7 @@ LRESULT CALLBACK opendojo_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
     // game window directly from practice mode, so we hook the close
     // request here. Safe even if the game cancels the close — saving
     // the same state again is idempotent.
-    if (msg == WM_CLOSE) {
-        opendojo::autosave::flush_now();
-    }
+    if (msg == WM_CLOSE) { opendojo::autosave::flush_now(); }
 
     if (g_imgui_ready.load()) {
         // WM_KEYDOWN handling. lparam bit 30 ("previous key state"):
@@ -502,9 +500,7 @@ void process_gamepad_for_chord(WORD buttons) {
             opendojo::config::cancel_pad_capture();
         } else if (pressed != 0) {
             WORD pick = pressed & static_cast<WORD>(-static_cast<int>(pressed));
-            if (pick != XINPUT_GAMEPAD_BACK) {
-                opendojo::config::notify_captured_pad_btn(pick);
-            }
+            if (pick != XINPUT_GAMEPAD_BACK) { opendojo::config::notify_captured_pad_btn(pick); }
         }
         return;  // don't fire the chord while binding
     }
@@ -662,9 +658,7 @@ void render_frame() {
     if (!fc.allocator) return;
 
     ID3D12Resource* back_buffer = nullptr;
-    if (FAILED(g_swapchain->GetBuffer(idx, IID_PPV_ARGS(&back_buffer))) || !back_buffer) {
-        return;
-    }
+    if (FAILED(g_swapchain->GetBuffer(idx, IID_PPV_ARGS(&back_buffer))) || !back_buffer) { return; }
     g_device->CreateRenderTargetView(back_buffer, nullptr, g_rtv_cpu);
 
     if (fc.fence_value > 0 && g_fence->GetCompletedValue() < fc.fence_value) {
@@ -757,13 +751,9 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
     if (!g_imgui_ready.load()) {
         static std::atomic<unsigned> present_count{0};
         const unsigned n = present_count.fetch_add(1);
-        if (n < 6) {
-            OPENDOJO_LOG("render_hook: hook_present #%u (queue=0x%p)", n, g_queue);
-        }
+        if (n < 6) { OPENDOJO_LOG("render_hook: hook_present #%u (queue=0x%p)", n, g_queue); }
         constexpr unsigned WARMUP_FRAMES = 60;
-        if (!g_queue || n < WARMUP_FRAMES) {
-            return g_present_orig(self, sync_interval, flags);
-        }
+        if (!g_queue || n < WARMUP_FRAMES) { return g_present_orig(self, sync_interval, flags); }
 
         // Reject set: swapchains we've already tried that don't work.
         // Static so it persists across calls without owning anything.
@@ -774,9 +764,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
         static unsigned first_attempt_present = 0;
 
         for (int i = 0; i < rejected_count; ++i) {
-            if (rejected[i] == self) {
-                return g_present_orig(self, sync_interval, flags);
-            }
+            if (rejected[i] == self) { return g_present_orig(self, sync_interval, flags); }
         }
 
         if (attempts == 0) first_attempt_present = n;
@@ -872,12 +860,8 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
     // rationale.
     opendojo::autosave::tick();
 
-    if (!g_menu_visible.load()) {
-        return g_present_orig(self, sync_interval, flags);
-    }
-    if (!g_device || !g_swapchain) {
-        return g_present_orig(self, sync_interval, flags);
-    }
+    if (!g_menu_visible.load()) { return g_present_orig(self, sync_interval, flags); }
+    if (!g_device || !g_swapchain) { return g_present_orig(self, sync_interval, flags); }
     if (self != static_cast<IDXGISwapChain*>(g_swapchain)) {
         return g_present_orig(self, sync_interval, flags);
     }
@@ -1011,9 +995,7 @@ void install_worker() {
         return;
     }
 
-    if (!do_install()) {
-        OPENDOJO_LOG("render_hook: install failed — menu disabled this session");
-    }
+    if (!do_install()) { OPENDOJO_LOG("render_hook: install failed — menu disabled this session"); }
 }
 
 }  // anonymous namespace

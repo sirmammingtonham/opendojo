@@ -109,12 +109,12 @@ set(OPENDOJO_PROXY "dinput8" CACHE STRING
     "Which Windows DLL OpenDojo masquerades as. dinput8 is the default.")
 set_property(CACHE OPENDOJO_PROXY PROPERTY STRINGS dinput8)
 
-set(OPENDOJO_PROXY_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/proxy_${OPENDOJO_PROXY}.cpp")
+set(OPENDOJO_PROXY_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/hooks/proxy_${OPENDOJO_PROXY}.cpp")
 set(OPENDOJO_PROXY_DEF "${CMAKE_CURRENT_SOURCE_DIR}/proxy_${OPENDOJO_PROXY}.def")
 
 if(NOT EXISTS "${OPENDOJO_PROXY_SRC}" OR NOT EXISTS "${OPENDOJO_PROXY_DEF}")
     message(FATAL_ERROR
-        "Unsupported OPENDOJO_PROXY=${OPENDOJO_PROXY}. Add proxy_${OPENDOJO_PROXY}.cpp "
+        "Unsupported OPENDOJO_PROXY=${OPENDOJO_PROXY}. Add src/hooks/proxy_${OPENDOJO_PROXY}.cpp "
         "and proxy_${OPENDOJO_PROXY}.def to the dll/ directory.")
 endif()
 
@@ -129,15 +129,15 @@ add_library(opendojo SHARED
     src/drill.cpp
     src/log.cpp
     src/memory.cpp
-    src/menu.cpp
-    src/player_hook.cpp
     src/players.cpp
     src/practice_state.cpp
-    src/render_hook.cpp
     src/signatures.cpp
     src/slot.cpp
     src/subsystems.cpp
-    src/theme.cpp
+    src/hooks/player_hook.cpp
+    src/hooks/render_hook.cpp
+    src/ui/menu.cpp
+    src/ui/theme.cpp
     src/cloud/api.cpp
     src/cloud/auth.cpp
     src/cloud/cloud.cpp
@@ -147,7 +147,7 @@ add_library(opendojo SHARED
     src/cloud/worker.cpp
     "${OPENDOJO_PROXY_SRC}")
 
-target_include_directories(opendojo PRIVATE src)
+target_include_directories(opendojo PRIVATE include)
 target_link_libraries(opendojo PRIVATE
     imgui_static
     minhook
@@ -175,7 +175,7 @@ set(OPENDOJO_CLOUD_PROXY_KEY ""
 # uploaded from this build, so the Browse tab can warn when downloading
 # a drill recorded on an incompatible patch. Bump when the mod's
 # signatures.cpp / offsets are updated for a new game patch.
-set(OPENDOJO_TEKKEN_VERSION "3.00.02"
+set(OPENDOJO_TEKKEN_VERSION "3.01.01"
     CACHE STRING "Tekken 8 version this DLL was built for (free-form, e.g. 3.00.02)")
 
 target_compile_definitions(opendojo PRIVATE
@@ -207,9 +207,13 @@ find_program(OPENDOJO_CLANG_FORMAT
 if(OPENDOJO_CLANG_FORMAT)
     file(GLOB OPENDOJO_FORMAT_SRCS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/cloud/*.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/cloud/*.hpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/hooks/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/cloud/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/hooks/*.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/ui/*.hpp")
     add_custom_command(TARGET opendojo PRE_BUILD
         COMMAND ${OPENDOJO_CLANG_FORMAT} -i -style=file ${OPENDOJO_FORMAT_SRCS}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

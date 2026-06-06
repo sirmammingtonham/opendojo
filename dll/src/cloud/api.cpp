@@ -1,4 +1,4 @@
-#include "api.hpp"
+#include "cloud/api.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -9,10 +9,10 @@
 #include <sstream>
 #include <string>
 
-#include "../log.hpp"
-#include "auth.hpp"
-#include "cloud.hpp"
-#include "http.hpp"
+#include "cloud/auth.hpp"
+#include "cloud/cloud.hpp"
+#include "cloud/http.hpp"
+#include "log.hpp"
 
 namespace opendojo::cloud::api {
 
@@ -161,9 +161,7 @@ ListResult list_drills(const ListQuery& q) {
     std::ostringstream url;
     url << opendojo::cloud::rest_url() << "/drill_summaries?";
     url << "select=*";
-    if (!q.character_filter.empty()) {
-        url << "&character=eq." << url_encode(q.character_filter);
-    }
+    if (!q.character_filter.empty()) { url << "&character=eq." << url_encode(q.character_filter); }
     if (!q.search_query.empty()) {
         // PostgREST FTS: ?search_tsv=fts(simple).<term>. Use prefix
         // matching by appending :* so "jin" matches "jin string".
@@ -348,9 +346,7 @@ DeleteResult delete_my_drill(const std::string& drill_id) {
         out.deleted = j[0].get<bool>();
     }
     out.ok = true;
-    if (!out.deleted) {
-        out.error_message = "drill not found or not yours";
-    }
+    if (!out.deleted) { out.error_message = "drill not found or not yours"; }
     return out;
 }
 

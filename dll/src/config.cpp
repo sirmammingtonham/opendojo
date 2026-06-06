@@ -52,9 +52,7 @@ std::filesystem::path config_path() {
 std::filesystem::path appdata_root() {
     wchar_t buf[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        return std::filesystem::path(buf) / L"OpenDojo";
-    }
+    if (n > 0 && n < MAX_PATH) { return std::filesystem::path(buf) / L"OpenDojo"; }
     return opendojo::commands::drills_dir();
 }
 
@@ -89,8 +87,12 @@ void write_doc_locked(const std::filesystem::path& path, const json& doc) {
     f << doc.dump(2);
 }
 
-void write_config_locked() { write_doc_locked(config_path(), g_doc); }
-void write_identity_locked() { write_doc_locked(identity_path(), g_identity); }
+void write_config_locked() {
+    write_doc_locked(config_path(), g_doc);
+}
+void write_identity_locked() {
+    write_doc_locked(identity_path(), g_identity);
+}
 
 // Copy the four auth fields from a source object into g_identity.
 void adopt_identity_fields_locked(const json& src) {
@@ -152,8 +154,8 @@ void migrate_legacy_locked() {
     // config.json once embedded the auth bundle under cloud.auth. Lift it out
     // to AppData identity.json (if we don't already have one) so the identity
     // survives a reinstall, then strip it from config.json regardless.
-    if (g_doc.contains("cloud") && g_doc["cloud"].is_object() &&
-        g_doc["cloud"].contains("auth") && g_doc["cloud"]["auth"].is_object()) {
+    if (g_doc.contains("cloud") && g_doc["cloud"].is_object() && g_doc["cloud"].contains("auth") &&
+        g_doc["cloud"]["auth"].is_object()) {
         if (g_identity.empty()) {
             adopt_identity_fields_locked(g_doc["cloud"]["auth"]);
             write_identity_locked();
