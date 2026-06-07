@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // This module owns all persistent state, split across two files:
 //   * Settings — opendojo/config.json, beside the game executable:
@@ -69,5 +70,14 @@ struct AuthTokens {
 // Returns all-empty tokens if not signed in.
 AuthTokens auth_tokens();
 void set_auth_tokens(const AuthTokens& tokens);
+
+// ---- Pinned drills --------------------------------------------------------
+// Identified by file name (with extension) within opendojo/, so renames
+// or directory moves cleanly un-pin the entry. Pinned drills sort above
+// non-pinned ones in the Drills tab.
+
+std::vector<std::string> pinned_drills();
+bool is_drill_pinned(const std::string& filename);
+void set_drill_pinned(const std::string& filename, bool pinned);
 
 }  // namespace opendojo::config

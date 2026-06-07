@@ -64,7 +64,11 @@ create table drills (
     character         text not null check (char_length(character) between 1 and 32),
     cpu_side          text check (cpu_side in ('p1', 'p2', '')),
     recordings_count  int  not null check (recordings_count between 1 and 8),
-    author_handle     text check (char_length(author_handle) <= 32),
+    -- Required: anonymous uploads aren't allowed. The DLL seeds the
+    -- handle from the player's Steam persona on first launch and
+    -- prevents overriding it to empty; the Edge Function rejects
+    -- requests with a missing / blank handle.
+    author_handle     text not null check (char_length(author_handle) between 1 and 32),
 
     -- Taxonomy. categories is a small array (0..5) of drill_categories.id;
     -- difficulty is a single optional drill_difficulties.id. Validation

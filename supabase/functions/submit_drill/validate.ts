@@ -113,7 +113,7 @@ export type Validated = {
     cpu_side: "p1" | "p2" | "";
     recordings_count: number;
     content: string;
-    author_handle: string | null;
+    author_handle: string;
     categories: string[];
     difficulty: string | null;
     dll_version: string | null;
@@ -241,14 +241,14 @@ export function validate(body: SubmitBody): { ok: Validated } | { err: string } 
         description = d;
     }
 
-    // ---- author_handle (single-line) -----------------------------------
-    let author_handle: string | null = null;
-    if (body.author_handle != null) {
-        const ah = trimStr(body.author_handle, 32);
-        if (!ah)                            return { err: "author_handle must be 1-32 chars" };
-        if (hasForbiddenChar(ah, false))    return { err: "author_handle contains forbidden characters" };
-        author_handle = ah;
-    }
+    // ---- author_handle (required, single-line) -------------------------
+    // Anonymous uploads aren't allowed. The DLL refuses to send a blank
+    // handle; the server enforces it again so a hand-rolled request
+    // can't bypass attribution.
+    const ah = trimStr(body.author_handle, 32);
+    if (!ah)                              return { err: "author_handle is required (1-32 chars)" };
+    if (hasForbiddenChar(ah, false))      return { err: "author_handle contains forbidden characters" };
+    const author_handle: string = ah;
 
     // ---- cpu_side (enum) -----------------------------------------------
     const cpu_side_raw = typeof body.cpu_side === "string" ? body.cpu_side : "";

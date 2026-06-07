@@ -90,11 +90,14 @@ bool destructive_button(const char* label, const ImVec2& size = ImVec2(0, 0)) {
 
 // Character-combo indices we use internally:
 //   0      = "All characters" (no filter)
-//   1      = "current CPU (...)" — auto-detected, disabled when none
-//   2..N+1 = explicit roster pick — index into players::character_roster()
+//   1..N   = explicit roster pick — index into players::character_roster()
+// On first render the combo is auto-selected to the detected CPU's
+// roster index (or "All" if no detection); the user can change it
+// like any other dropdown. We don't surface a separate "current CPU"
+// synthetic option because the Export tab already shows the live CPU
+// character right above this section.
 constexpr int kCharComboAll = 0;
-constexpr int kCharComboCpu = 1;
-constexpr int kCharComboRosterBase = 2;
+constexpr int kCharComboRosterBase = 1;
 
 // Cached copy of the sorted character list. Built once on first call;
 // keeps draw_browse_tab from hitting the loop in character_roster()
@@ -129,7 +132,8 @@ struct BrowseState {
     // User-controlled inputs live on the render thread, so they don't
     // need mtx. ImGui owns the buffer storage.
     char search_buf[96] = "";
-    int character_combo_idx = kCharComboCpu;  // default: match current CPU
+    // -1 = uninitialized; first draw seeds from the detected CPU.
+    int character_combo_idx = -1;
     bool category_filter[kCategoryCount] = {false, false, false, false, false};
     int difficulty_filter_idx = 0;  // 0 = Any
     int sort_idx = 0;               // 0 Newest, 1 Downloaded, 2 Liked
@@ -158,10 +162,52 @@ struct UploadState {
     std::atomic<bool> in_flight{false};
     bool category_picks[kCategoryCount] = {false, false, false, false, false};
     int difficulty_idx = 0;  // 0 = (none)
+    // Persistent last-upload status — toast disappears after a few
+    // seconds, but the Share card keeps showing this line so a user
+    // who looks away can still see whether the last upload succeeded.
+    std::mutex status_mtx;
+    std::string status_msg;
+    bool status_is_error = false;
 };
 UploadState g_upload;
 
+void set_upload_status(std::string msg, bool err) {
+    std::lock_guard lk(g_upload.status_mtx);
+    g_upload.status_msg = std::move(msg);
+    g_upload.status_is_error = err;
+}
+
 const char* kSortLabels[] = {"Newest", "Most downloaded", "Most liked"};
+
+// Width an ImGui combo needs to fully show the longest of `items`
+// without truncation. Combo reserves space on the right for the
+// down-arrow button (== frame height) plus FramePadding on each
+// side of the visible text. Use this with PushItemWidth so the
+// widget always grows to fit its content rather than relying on
+// hand-picked pixel widths that drift as fonts change.
+float combo_item_width(const char* const* items, int count) {
+    float max_w = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        max_w = (std::max)(max_w, ImGui::CalcTextSize(items[i]).x);
+    }
+    const auto& style = ImGui::GetStyle();
+    return max_w + ImGui::GetFrameHeight() + style.FramePadding.x * 2.0f;
+}
+
+// Convenience overload for std::vector<std::string> (used by the
+// character-roster combo which builds its options dynamically).
+float combo_item_width(const std::vector<std::string>& items, const char* const* extras,
+                       int extra_count) {
+    float max_w = 0.0f;
+    for (int i = 0; i < extra_count; ++i) {
+        max_w = (std::max)(max_w, ImGui::CalcTextSize(extras[i]).x);
+    }
+    for (const auto& s : items) {
+        max_w = (std::max)(max_w, ImGui::CalcTextSize(s.c_str()).x);
+    }
+    const auto& style = ImGui::GetStyle();
+    return max_w + ImGui::GetFrameHeight() + style.FramePadding.x * 2.0f;
+}
 
 opendojo::cloud::api::SortOrder sort_from_idx(int i) {
     using S = opendojo::cloud::api::SortOrder;
@@ -173,19 +219,24 @@ opendojo::cloud::api::SortOrder sort_from_idx(int i) {
 }
 
 // Resolve the character-combo selection to the actual filter string
-// the API expects. Returns "" if "All" is selected or if "current CPU"
-// is selected but no CPU is detected.
+// the API expects. Returns "" if "All" is selected.
 std::string resolve_character_filter() {
     int idx = g_browse.character_combo_idx;
-    if (idx == kCharComboAll) return {};
-    if (idx == kCharComboCpu) {
-        auto cpu = opendojo::players::detect_cpu();
-        return cpu.detected ? cpu.character_name : std::string{};
-    }
+    if (idx <= kCharComboAll) return {};
     int rosterIdx = idx - kCharComboRosterBase;
     const auto& r = roster();
     if (rosterIdx >= 0 && rosterIdx < static_cast<int>(r.size())) return r[rosterIdx];
     return {};
+}
+
+// Find the roster index for `character_name`, or -1 if not present.
+int roster_index_of(const std::string& character_name) {
+    if (character_name.empty()) return -1;
+    const auto& r = roster();
+    for (int i = 0; i < static_cast<int>(r.size()); ++i) {
+        if (r[i] == character_name) return i;
+    }
+    return -1;
 }
 
 void kick_list() {
@@ -256,7 +307,7 @@ void kick_report(const std::string& drill_id, const std::string& display_name,
         if (r.reported) {
             opendojo::menu::queue_toast("Reported: " + display_name, false);
         } else {
-            opendojo::menu::queue_toast("Already reported — thanks.", false);
+            opendojo::menu::queue_toast("Already reported.", false);
         }
     });
 }
@@ -316,6 +367,7 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
     auto p = opendojo::commands::build_current_slots_payload(name_in, description_in);
     if (!p.ok) {
         opendojo::menu::queue_toast(p.message, true);
+        set_upload_status(p.message, true);
         return;
     }
 
@@ -334,8 +386,15 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
     // touches steam_api64.dll via GetProcAddress; safer to do it here
     // where DLL state is well-defined than from the worker thread.
     std::string author = opendojo::cloud::handle::current();
+    if (author.empty()) {
+        const char* msg = "Set an author handle in Settings before uploading.";
+        opendojo::menu::queue_toast(msg, true);
+        set_upload_status(msg, true);
+        return;
+    }
 
     g_upload.in_flight.store(true);
+    set_upload_status("Uploading...", false);
     opendojo::cloud::worker::submit([payload = std::move(p),
                                      categories = std::move(picked_categories),
                                      difficulty = std::move(picked_difficulty),
@@ -355,34 +414,39 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
         auto r = opendojo::cloud::api::submit_drill(args);
         g_upload.in_flight.store(false);
         if (!r.ok) {
-            opendojo::menu::queue_toast(r.error_message.empty() ? "upload failed" : r.error_message,
-                                        true);
+            std::string msg = r.error_message.empty() ? "upload failed" : r.error_message;
+            opendojo::menu::queue_toast(msg, true);
+            set_upload_status(std::move(msg), true);
             return;
         }
-        if (r.deduped) {
-            opendojo::menu::queue_toast("Already on OpenDojo Cloud — nice.", false);
-        } else {
-            opendojo::menu::queue_toast("Uploaded to OpenDojo Cloud", false);
-        }
+        const char* msg = r.deduped ? "Identical drill already on OpenDojo Cloud"
+                                    : "Uploaded to OpenDojo Cloud";
+        opendojo::menu::queue_toast(msg, false);
+        set_upload_status(msg, false);
     });
 }
 
 }  // namespace
 
-void draw_browse_tab() {
+void draw_cloud_tab() {
     if (!opendojo::cloud::configured()) {
         ImGui::TextDisabled("OpenDojo Cloud is not configured in this build.");
         ImGui::Spacing();
         ImGui::TextWrapped(
-            "Source builds ship without cloud access — Browse and Upload are "
-            "disabled. Everything else works normally.");
+            "Source builds ship without cloud access — Cloud browse and Upload "
+            "are disabled. Everything else works normally.");
         return;
     }
 
-    // First time the tab renders, kick off a default search so the
-    // user lands on a populated list instead of an empty pane.
+    // First time the tab renders, seed the character filter from the
+    // detected CPU and kick off the default search so the user lands
+    // on a populated list. After this initial seed the combo is
+    // user-controlled.
     if (!g_browse.initial_load_done) {
         g_browse.initial_load_done = true;
+        auto cpu = opendojo::players::detect_cpu();
+        int seed = roster_index_of(cpu.detected ? cpu.character_name : std::string{});
+        g_browse.character_combo_idx = seed >= 0 ? (kCharComboRosterBase + seed) : kCharComboAll;
         kick_list();
     }
 
@@ -411,47 +475,27 @@ void draw_browse_tab() {
     }
 
     // ---- Row 2: character / difficulty / sort -----------------------------
-    auto cpu = opendojo::players::detect_cpu();
     ImGui::Spacing();
     ImGui::TextDisabled("Character:");
     ImGui::SameLine();
     {
-        // Build the visible label of the currently-selected entry so
-        // the combo header reads sensibly without rebuilding the list
-        // every frame.
         std::string current_label;
         int idx = g_browse.character_combo_idx;
-        if (idx == kCharComboAll) {
+        if (idx <= kCharComboAll) {
             current_label = "All characters";
-        } else if (idx == kCharComboCpu) {
-            current_label = cpu.detected ? "current CPU (" + cpu.character_name + ")"
-                                         : "current CPU (none detected)";
         } else {
             int ri = idx - kCharComboRosterBase;
             const auto& r = roster();
             current_label = (ri >= 0 && ri < static_cast<int>(r.size())) ? r[ri] : "?";
         }
 
-        ImGui::PushItemWidth(200);
+        const char* kAllLabel[] = {"All characters"};
+        ImGui::PushItemWidth(combo_item_width(roster(), kAllLabel, 1));
         if (ImGui::BeginCombo("##character", current_label.c_str())) {
             if (ImGui::Selectable("All characters", idx == kCharComboAll)) {
                 g_browse.character_combo_idx = kCharComboAll;
                 g_browse.offset = 0;
                 kick_list();
-            }
-            // "current CPU" — only enabled when we have a detection.
-            if (cpu.detected) {
-                char buf[64];
-                std::snprintf(buf, sizeof(buf), "current CPU (%s)", cpu.character_name.c_str());
-                if (ImGui::Selectable(buf, idx == kCharComboCpu)) {
-                    g_browse.character_combo_idx = kCharComboCpu;
-                    g_browse.offset = 0;
-                    kick_list();
-                }
-            } else {
-                ImGui::BeginDisabled();
-                ImGui::Selectable("current CPU (none detected)", false);
-                ImGui::EndDisabled();
             }
             ImGui::Separator();
             const auto& r = roster();
@@ -473,7 +517,8 @@ void draw_browse_tab() {
     ImGui::SameLine();
     ImGui::TextDisabled("Difficulty:");
     ImGui::SameLine();
-    ImGui::PushItemWidth(140);
+    ImGui::PushItemWidth(
+        combo_item_width(kDifficultyFilterLabels, IM_ARRAYSIZE(kDifficultyFilterLabels)));
     if (ImGui::Combo("##diff_filter", &g_browse.difficulty_filter_idx, kDifficultyFilterLabels,
                      IM_ARRAYSIZE(kDifficultyFilterLabels))) {
         g_browse.offset = 0;
@@ -485,7 +530,7 @@ void draw_browse_tab() {
     ImGui::SameLine();
     ImGui::TextDisabled("Sort:");
     ImGui::SameLine();
-    ImGui::PushItemWidth(160);
+    ImGui::PushItemWidth(combo_item_width(kSortLabels, IM_ARRAYSIZE(kSortLabels)));
     if (ImGui::Combo("##sort", &g_browse.sort_idx, kSortLabels, IM_ARRAYSIZE(kSortLabels))) {
         g_browse.offset = 0;
         kick_list();
@@ -701,9 +746,7 @@ void draw_browse_tab() {
         ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1), "%s",
                            g_browse.delete_target_name.c_str());
         ImGui::Spacing();
-        ImGui::TextWrapped(
-            "Other players will lose access immediately. Their likes "
-            "and downloads are removed too. This can't be undone.");
+        ImGui::TextWrapped("Other players will lose access immediately. This can't be undone.");
         ImGui::Spacing();
         if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
@@ -725,9 +768,7 @@ void draw_browse_tab() {
         ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1), "%s",
                            g_browse.report_target_name.c_str());
         ImGui::Spacing();
-        ImGui::TextWrapped(
-            "Tell us what's wrong (optional). The admin reviews reports; "
-            "a drill with several reports is auto-hidden pending review.");
+        ImGui::TextWrapped("Tell us what's wrong (optional).");
         ImGui::Spacing();
         ImGui::PushItemWidth(380);
         ImGui::InputTextMultiline(
@@ -766,61 +807,86 @@ void draw_browse_tab() {
     if (g_browse.offset > 0 || static_cast<int>(snapshot.size()) >= kPageSize) {
         ImGui::TextDisabled("Page %d", g_browse.offset / kPageSize + 1);
     }
-
-    ImGui::Spacing();
-    ImGui::TextDisabled(
-        "Downloaded drills land in opendojo/ alongside your local ones — "
-        "use the Drills tab to load them.");
 }
 
-void draw_upload_export_row(bool can_export, const char* name, const char* description) {
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Share");
-    ImGui::Spacing();
-
+void draw_share_card_body(bool can_export, const char* name, const char* description) {
     if (!opendojo::cloud::configured()) {
-        ImGui::TextDisabled(
+        ImGui::TextWrapped(
             "Upload to OpenDojo Cloud is disabled — this DLL was built without "
-            "cloud credentials.");
+            "cloud support.");
         return;
     }
 
-    // ---- Tagging form (categories + difficulty). Everything here
-    // is optional — uploads with zero tags / no difficulty go through
-    // fine. Persists across uploads so a user grinding through ten
-    // "punishment" drills in a row doesn't re-check each box.
-    ImGui::TextDisabled("Tags (optional, pick any):");
-    ImGui::SameLine();
-    for (int i = 0; i < kCategoryCount; ++i) {
-        ImGui::PushID(i);
-        ImGui::Checkbox(kCategories[i].label, &g_upload.category_picks[i]);
-        ImGui::PopID();
-        if (i + 1 < kCategoryCount) ImGui::SameLine();
+    // ---- Tag chips in a 2-column grid so the second column lines
+    // up across rows. SizingStretchSame splits the card width
+    // evenly; NoPadOuterX keeps cells flush with the rest of the
+    // card content. With 5 categories the last row's right cell is
+    // empty — that's fine; the grid stays aligned.
+    ImGui::TextDisabled("Tags (optional)");
+    if (ImGui::BeginTable("upload_tags", 2,
+                          ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoPadOuterX)) {
+        for (int i = 0; i < kCategoryCount; ++i) {
+            ImGui::TableNextColumn();
+            ImGui::PushID(i);
+            ImGui::Checkbox(kCategories[i].label, &g_upload.category_picks[i]);
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
     }
 
-    ImGui::TextDisabled("Difficulty (optional):");
+    ImGui::Spacing();
+
+    ImGui::TextDisabled("Difficulty (optional)");
     ImGui::SameLine();
-    ImGui::PushItemWidth(160);
+    ImGui::PushItemWidth(
+        combo_item_width(kUploadDifficultyLabels, IM_ARRAYSIZE(kUploadDifficultyLabels)));
     ImGui::Combo("##upload_diff", &g_upload.difficulty_idx, kUploadDifficultyLabels,
                  IM_ARRAYSIZE(kUploadDifficultyLabels));
     ImGui::PopItemWidth();
 
     ImGui::Spacing();
 
-    bool in_flight = g_upload.in_flight.load();
-    bool disabled = !can_export || in_flight;
+    // Show who the upload will be attributed to. Anonymous uploads
+    // aren't allowed; the handle module guarantees a non-empty value
+    // by re-seeding from Steam when needed.
+    const std::string author = opendojo::cloud::handle::current();
+    ImGui::TextDisabled("As:");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.55f, 0.95f, 0.65f, 1), "%s", author.c_str());
 
+    ImGui::Spacing();
+
+    const bool in_flight = g_upload.in_flight.load();
+    const bool disabled = !can_export || in_flight;
     if (disabled) ImGui::BeginDisabled();
-    if (ImGui::Button(in_flight ? "Uploading..." : "Upload to OpenDojo Cloud")) {
+    if (ImGui::Button(in_flight ? "Uploading..." : "Share to OpenDojo Cloud",
+                      ImVec2(-FLT_MIN, 0))) {
         kick_upload(name ? name : "", description ? description : "");
     }
     if (disabled) ImGui::EndDisabled();
 
-    if (!can_export) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(record or pick a move first)");
+    // Persistent last-upload status — shown until the next upload
+    // overwrites it. Toast still fires for visibility from other
+    // tabs, but this line means an error never silently disappears.
+    std::string msg;
+    bool is_error;
+    {
+        std::lock_guard lk(g_upload.status_mtx);
+        msg = g_upload.status_msg;
+        is_error = g_upload.status_is_error;
+    }
+    if (!msg.empty()) {
+        ImGui::Spacing();
+        const ImVec4 col = is_error ? ImVec4(1.0f, 0.55f, 0.40f, 1.0f)
+                                    : ImVec4(0.55f, 0.95f, 0.65f, 1.0f);
+        if (is_error) {
+            ImGui::TextColored(col, "Last upload failed:");
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            ImGui::TextWrapped("%s", msg.c_str());
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::TextColored(col, "%s", msg.c_str());
+        }
     }
 }
 
@@ -859,20 +925,6 @@ void draw_settings_section() {
         opendojo::cloud::handle::reset_to_steam();
         auto cur = opendojo::cloud::handle::current();
         std::snprintf(handle_buf, sizeof(handle_buf), "%s", cur.c_str());
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Clear##handle")) {
-        handle_buf[0] = 0;
-        opendojo::cloud::handle::set("");
-    }
-
-    auto effective = opendojo::cloud::handle::current();
-    if (!effective.empty()) {
-        ImGui::Text("Uploading as:");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.55f, 0.95f, 0.65f, 1), "%s", effective.c_str());
-    } else {
-        ImGui::TextDisabled("Uploads will be anonymous until you set a handle.");
     }
 }
 

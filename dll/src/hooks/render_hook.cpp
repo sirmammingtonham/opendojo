@@ -297,12 +297,21 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
     cfg.OversampleV = 2;
     cfg.PixelSnapH = true;
 
+    // Default Latin + a tiny handful of symbol glyphs the menu uses:
+    // U+2605/2606 (★/☆) for the Drills tab pin toggle. Storage must
+    // outlive font load — ImGui holds a pointer to this array until
+    // the texture atlas is built.
+    static const ImWchar kGlyphRanges[] = {
+        0x0020, 0x00FF,  // Basic Latin + Latin-1 Supplement (matches GetGlyphRangesDefault)
+        0x2605, 0x2606,  // BLACK STAR, WHITE STAR
+        0,
+    };
+
     auto try_path = [&](const std::filesystem::path& p, const char* label) -> bool {
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) return false;
         auto utf8 = p.string();
-        ImFont* fnt = io.Fonts->AddFontFromFileTTF(utf8.c_str(), pixel_size, &cfg,
-                                                   io.Fonts->GetGlyphRangesDefault());
+        ImFont* fnt = io.Fonts->AddFontFromFileTTF(utf8.c_str(), pixel_size, &cfg, kGlyphRanges);
         if (!fnt) {
             OPENDOJO_LOG("render_hook: AddFontFromFileTTF failed for %s (%s)", utf8.c_str(), label);
             return false;

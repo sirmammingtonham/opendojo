@@ -412,25 +412,59 @@ std::string local_username() {
     using SteamFriendsFn = void* (*)();
     using GetPersonaNameFn = const char* (*)(void* /*self*/);
 
-    auto steam_friends = reinterpret_cast<SteamFriendsFn>(GetProcAddress(steam, "SteamFriends"));
+    // The flat method shim. Stable across SDK versions because
+    // ISteamFriends::GetPersonaName has lived at vtable slot 0
+    // since SDK 1.0.
     auto get_persona_name = reinterpret_cast<GetPersonaNameFn>(
         GetProcAddress(steam, "SteamAPI_ISteamFriends_GetPersonaName"));
-    if (!steam_friends || !get_persona_name) {
+    if (!get_persona_name) {
         OPENDOJO_LOG(
-            "players::local_username: steam_api64.dll missing flat exports "
-            "(SteamFriends=%p GetPersonaName=%p) — returning empty",
-            static_cast<void*>(steam_friends), static_cast<void*>(get_persona_name));
+            "players::local_username: steam_api64.dll missing "
+            "SteamAPI_ISteamFriends_GetPersonaName — returning empty");
         return {};
     }
 
-    void* self = steam_friends();
-    if (!self) return {};
+    // ISteamFriends* accessor. Modern Steamworks (SDK 1.50+) only
+    // exports the *versioned* accessor (e.g. SteamAPI_SteamFriends_v017
+    // for SDK 1.53, which Tekken ships); the unversioned `SteamFriends`
+    // is an inline in the header, not a DLL export. We try the known
+    // span so this survives a Steamworks SDK bump in a future Tekken
+    // patch. All versioned pointers are vtable-compatible with the
+    // GetPersonaName shim above — ISteamFriends evolves by appending
+    // methods, not by reordering existing ones.
+    static constexpr const char* kFriendsAccessors[] = {
+        "SteamAPI_SteamFriends_v020",
+        "SteamAPI_SteamFriends_v019",
+        "SteamAPI_SteamFriends_v018",
+        "SteamAPI_SteamFriends_v017",
+    };
+    void* self = nullptr;
+    const char* used = nullptr;
+    for (const char* accessor : kFriendsAccessors) {
+        auto fn = reinterpret_cast<SteamFriendsFn>(GetProcAddress(steam, accessor));
+        if (!fn) continue;
+        if (auto p = fn()) {
+            self = p;
+            used = accessor;
+            break;
+        }
+    }
+    if (!self) {
+        OPENDOJO_LOG(
+            "players::local_username: no SteamAPI_SteamFriends_v0XX accessor "
+            "returned a pointer — Steam SDK may have moved past v020");
+        return {};
+    }
 
     // The shim returns a pointer owned by Steam — copy it before
     // returning so we don't hold a pointer into Steam's address space
     // any longer than we have to.
     const char* name = get_persona_name(self);
-    if (!name || !*name) return {};
+    if (!name || !*name) {
+        OPENDOJO_LOG("players::local_username: %s returned a pointer but persona was empty", used);
+        return {};
+    }
+    OPENDOJO_LOG("players::local_username: resolved persona '%s' via %s", name, used);
     return std::string(name);
 }
 

@@ -44,6 +44,10 @@ function body(overrides: Partial<SubmitBody> = {}): SubmitBody {
         character: "jin",
         recordings_count: 1,
         content,
+        // author_handle is now required server-side; provide a default
+        // so each test doesn't have to. Use `body({ author_handle: ... })`
+        // (incl. `undefined` / "") to verify reject-paths.
+        author_handle: "Tester",
         ...overrides,
     };
 }
@@ -183,8 +187,12 @@ Deno.test("description: bidi override rejected", () => {
 
 // ---- author_handle ---------------------------------------------------------
 
-Deno.test("author_handle: optional", () => {
-    expectOk(body({ author_handle: undefined }));
+Deno.test("author_handle: required (missing rejected)", () => {
+    expectErr(body({ author_handle: undefined }), "author_handle");
+});
+
+Deno.test("author_handle: required (blank rejected)", () => {
+    expectErr(body({ author_handle: "   " }), "author_handle");
 });
 
 Deno.test("author_handle: control char rejected", () => {

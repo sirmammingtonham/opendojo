@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <xinput.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -339,6 +340,47 @@ void set_auth_tokens(const AuthTokens& tokens) {
     g_identity["user_id"] = tokens.user_id;
     g_identity["expires_at"] = tokens.expires_at_sec;
     write_identity_locked();
+}
+
+// ---- Pinned drills --------------------------------------------------------
+
+std::vector<std::string> pinned_drills() {
+    std::vector<std::string> out;
+    std::lock_guard lk(g_mtx);
+    if (!g_doc.contains("pinned_drills") || !g_doc["pinned_drills"].is_array()) return out;
+    out.reserve(g_doc["pinned_drills"].size());
+    for (const auto& e : g_doc["pinned_drills"]) {
+        if (e.is_string()) out.push_back(e.get<std::string>());
+    }
+    return out;
+}
+
+bool is_drill_pinned(const std::string& filename) {
+    if (filename.empty()) return false;
+    std::lock_guard lk(g_mtx);
+    if (!g_doc.contains("pinned_drills") || !g_doc["pinned_drills"].is_array()) return false;
+    for (const auto& e : g_doc["pinned_drills"]) {
+        if (e.is_string() && e.get<std::string>() == filename) return true;
+    }
+    return false;
+}
+
+void set_drill_pinned(const std::string& filename, bool pinned) {
+    if (filename.empty()) return;
+    std::lock_guard lk(g_mtx);
+    if (!g_doc.contains("pinned_drills") || !g_doc["pinned_drills"].is_array()) {
+        g_doc["pinned_drills"] = json::array();
+    }
+    auto& arr = g_doc["pinned_drills"];
+    // Remove any existing entry — keeps the file de-duplicated and lets
+    // an unpin write fall through to the "not present" state cleanly.
+    arr.erase(std::remove_if(arr.begin(), arr.end(),
+                             [&](const json& e) {
+                                 return e.is_string() && e.get<std::string>() == filename;
+                             }),
+              arr.end());
+    if (pinned) arr.push_back(filename);
+    write_config_locked();
 }
 
 }  // namespace opendojo::config

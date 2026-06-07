@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -112,7 +113,7 @@ void show_toast(std::string text, bool is_error = false) {
 
 // Small destructive-action button. Same shape as Button but
 // hot-tinted so the eye notices it before the click. Used for
-// Delete affordances in Drills + Browse + confirmation modals.
+// Delete affordances in Drills + Cloud + confirmation modals.
 bool destructive_button(const char* label, const ImVec2& size = ImVec2(0, 0)) {
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.42f, 0.18f, 0.18f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.24f, 0.24f, 1.0f));
@@ -132,6 +133,46 @@ bool destructive_small_button(const char* label) {
     return clicked;
 }
 
+// Renders a small star icon at the current cursor position that toggles
+// the drill's pinned state when clicked. Pinned drills float to the top
+// of the Drills tab list. Pinned state shows a bright filled ★; unpinned
+// shows a very dim ☆ — visible enough to advertise the affordance,
+// quiet enough not to clutter every row. The button has no frame or
+// background so it reads as an inline icon rather than another action.
+//
+// `filename` is the in-folder file name (with .drill.txt) used as the
+// stable identity in config. Returns true if the pinned state changed.
+bool pin_toggle_button(const char* filename, bool currently_pinned) {
+    const char* icon = currently_pinned ? "\xE2\x98\x85" /* U+2605 ★ */
+                                        : "\xE2\x98\x86" /* U+2606 ☆ */;
+    const ImVec4 bright(1.00f, 0.82f, 0.30f, 1.00f);
+    const ImVec4 dim(1.00f, 1.00f, 1.00f, 0.18f);
+    ImGui::PushStyleColor(ImGuiCol_Text, currently_pinned ? bright : dim);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.08f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.16f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 0));
+    const bool clicked = ImGui::SmallButton(icon);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+    if (ImGui::IsItemHovered()) { ImGui::SetTooltip(currently_pinned ? "Unpin" : "Pin to top"); }
+    if (clicked) opendojo::config::set_drill_pinned(filename, !currently_pinned);
+    return clicked;
+}
+
+// Call immediately after a widget that lives in a scrollable region.
+// While gamepad/keyboard nav is active and this widget holds focus,
+// keeps the focused item centered in its scroll parent instead of
+// at the edge — so the user sees content above AND below it before
+// they have to nav into it. No effect when the user is on mouse
+// (io.NavActive is false), and a no-op when the item isn't focused.
+// Re-asserting SetScrollHereY each frame doesn't fight stick-scroll
+// in practice because controller users navigate by DPad which moves
+// focus rather than scrolling the window directly.
+void nav_recenter() {
+    if (ImGui::IsItemFocused() && ImGui::GetIO().NavActive) { ImGui::SetScrollHereY(0.5f); }
+}
+
 void drain_pending_ui_ops() {
     std::vector<PendingUiOps::QueuedToast> toasts;
     {
@@ -146,14 +187,34 @@ void drain_pending_ui_ops() {
     }
 }
 
+// After a successful Add/Replace on a saved drill, copy its metadata
+// into the Export form. Lets a user follow "load drill → tweak →
+// re-export / upload to cloud" without retyping name + description.
+// Autosaves intentionally skip this — their names are internal
+// ("_autosave_jin") and would just be noise in the Export field.
+void seed_export_form_from(const opendojo::commands::DrillHeader& d) {
+    if (d.is_autosave) return;
+    std::snprintf(g_state.export_name, sizeof(g_state.export_name), "%s", d.name.c_str());
+    std::snprintf(g_state.export_description, sizeof(g_state.export_description), "%s",
+                  d.description.c_str());
+}
+
 void refresh_drills_if_needed() {
     if (!g_state.drills_dirty) return;
     g_state.drills = opendojo::commands::list_drills();
-    // Autosaves first, then the regular drills in the user-chosen order.
+    // Snapshot pinned set once so the comparator below stays O(log n)
+    // per call instead of scanning the JSON array for each compare.
+    auto pinned_list = opendojo::config::pinned_drills();
+    std::set<std::string> pinned(pinned_list.begin(), pinned_list.end());
+    // Order: autosaves, then pinned, then the rest — within each group
+    // the user-chosen sort (Name or Newest) decides the order.
     std::sort(g_state.drills.begin(), g_state.drills.end(),
-              [](const opendojo::commands::DrillHeader& a,
-                 const opendojo::commands::DrillHeader& b) {
+              [&pinned](const opendojo::commands::DrillHeader& a,
+                        const opendojo::commands::DrillHeader& b) {
                   if (a.is_autosave != b.is_autosave) return a.is_autosave;
+                  const bool pa = pinned.count(a.path.filename().string()) > 0;
+                  const bool pb = pinned.count(b.path.filename().string()) > 0;
+                  if (pa != pb) return pa;
                   if (g_state.sort_mode == State::Sort::Newest) {
                       // Filesystem mtime; descending (newer first).
                       return a.mtime > b.mtime;
@@ -166,7 +227,8 @@ void refresh_drills_if_needed() {
 // ---- Tabs ------------------------------------------------------------------
 
 void draw_drills_tab() {
-    ImGui::TextDisabled("Drills found in opendojo/");
+    ImGui::TextDisabled(
+        "Drills in opendojo/.  Add fills empty slots; Replace clears all slots first.");
     ImGui::Spacing();
 
     auto cpu = opendojo::players::detect_cpu();
@@ -257,28 +319,29 @@ void draw_drills_tab() {
             ImGui::SameLine();
             ImGui::TextDisabled("(%zu rec)", d.recording_count);
             ImGui::SameLine();
-            if (ImGui::SmallButton("Add##autosave_add")) {
+            if (ImGui::Button("Add##autosave_add")) {
                 auto r = opendojo::commands::load_drill(d.path,
                                                         opendojo::commands::LoadMode::AppendToFree);
                 if (r.ok) opendojo::subsystems::mark_session_loaded(true);
                 show_toast(r.message, !r.ok);
             }
+            nav_recenter();
             ImGui::SameLine();
-            if (ImGui::SmallButton("Replace##autosave_replace")) {
+            if (ImGui::Button("Replace##autosave_replace")) {
                 auto r = opendojo::commands::load_drill(d.path,
                                                         opendojo::commands::LoadMode::ReplaceAll);
                 if (r.ok) opendojo::subsystems::mark_session_loaded(true);
                 show_toast(r.message, !r.ok);
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("Save as drill##autosave_save")) {
+            if (ImGui::Button("Save as drill##autosave_save")) {
                 std::string new_name = d.character.empty() ? "saved" : d.character + "_saved";
                 auto r = opendojo::commands::copy_drill(d.path, new_name);
                 show_toast(r.message, !r.ok);
                 if (r.ok) g_state.drills_dirty = true;
             }
             ImGui::SameLine();
-            if (destructive_small_button("Delete##autosave_delete")) {
+            if (destructive_button("Delete##autosave_delete")) {
                 g_state.delete_path = d.path;
                 g_state.delete_name = d.name;
                 g_state.delete_modal_open_requested = true;
@@ -297,70 +360,91 @@ void draw_drills_tab() {
         if (!autosave_idxs.empty()) {
             ImGui::TextDisabled("No saved drills yet — use Export or \"Save as drill\" above.");
         }
-    } else if (ImGui::BeginTable("drills", 6, flags, ImVec2(0, 320))) {
-        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.4f);
-        ImGui::TableSetupColumn("Character", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("Recordings", ImGuiTableColumnFlags_WidthStretch, 0.8f);
-        // Scale-aware column widths: compute the pixel width of the button
-        // label at the current font size + frame padding, since ImGui's
-        // WidthFixed takes raw pixels (not scaled).
+    } else {
+        // Slightly bumped vertical cell padding so SmallButton rows
+        // don't read as cramped. 5 px is just enough breathing room
+        // without making the table feel sparse.
+        constexpr float kCellPadY = 5.0f;
+        const float row_h = ImGui::GetTextLineHeightWithSpacing() + kCellPadY * 2;
+        // 6 data rows + header.
+        const ImVec2 table_size(0, row_h * 7);
+        // Scale-aware width for the actions column — wide enough to fit
+        // all three buttons inline plus padding between them.
         const auto pad = ImGui::GetStyle().FramePadding.x;
-        const float add_w = ImGui::CalcTextSize("Add").x + pad * 4;
-        const float repl_w = ImGui::CalcTextSize("Replace").x + pad * 4;
-        const float del_w = ImGui::CalcTextSize("Delete").x + pad * 4;
-        ImGui::TableSetupColumn("Add", ImGuiTableColumnFlags_WidthFixed, add_w);
-        ImGui::TableSetupColumn("Replace", ImGuiTableColumnFlags_WidthFixed, repl_w);
-        ImGui::TableSetupColumn("Delete", ImGuiTableColumnFlags_WidthFixed, del_w);
-        ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableHeadersRow();
+        const auto isp = ImGui::GetStyle().ItemSpacing.x;
+        const float add_w = ImGui::CalcTextSize("Add").x + pad * 2;
+        const float repl_w = ImGui::CalcTextSize("Replace").x + pad * 2;
+        const float del_w = ImGui::CalcTextSize("Delete").x + pad * 2;
+        const float actions_w = add_w + repl_w + del_w + isp * 2 + pad * 2;
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,
+                            ImVec2(ImGui::GetStyle().CellPadding.x, kCellPadY));
+        if (ImGui::BeginTable("drills", 4, flags, table_size)) {
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.4f);
+            ImGui::TableSetupColumn("Character", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            ImGui::TableSetupColumn("Recordings", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, actions_w);
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableHeadersRow();
 
-        for (std::size_t idx : regular_idxs) {
-            const auto& d = g_state.drills[idx];
-            ImGui::PushID(static_cast<int>(idx));
-            ImGui::TableNextRow();
+            for (std::size_t idx : regular_idxs) {
+                const auto& d = g_state.drills[idx];
+                const std::string fname = d.path.filename().string();
+                const bool pinned = opendojo::config::is_drill_pinned(fname);
+                ImGui::PushID(static_cast<int>(idx));
+                ImGui::TableNextRow();
 
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(d.name.c_str());
-            if (!d.description.empty() && ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", d.description.c_str());
+                ImGui::TableSetColumnIndex(0);
+                if (pin_toggle_button(fname.c_str(), pinned)) {
+                    g_state.drills_dirty = true;  // re-sort: pin/unpin changes group
+                }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(d.name.c_str());
+                if (!d.description.empty() && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", d.description.c_str());
+                }
+
+                ImGui::TableSetColumnIndex(1);
+                if (!d.cpu_side.empty()) {
+                    ImGui::Text("%s (%s)", d.character.c_str(), d.cpu_side.c_str());
+                } else {
+                    ImGui::TextUnformatted(d.character.c_str());
+                }
+
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%zu", d.recording_count);
+
+                ImGui::TableSetColumnIndex(3);
+                if (ImGui::SmallButton("Add##add")) {
+                    auto r = opendojo::commands::load_drill(
+                        d.path, opendojo::commands::LoadMode::AppendToFree);
+                    if (r.ok) {
+                        opendojo::subsystems::mark_session_loaded(true);
+                        seed_export_form_from(d);
+                    }
+                    show_toast(r.message, !r.ok);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Replace##replace")) {
+                    auto r = opendojo::commands::load_drill(
+                        d.path, opendojo::commands::LoadMode::ReplaceAll);
+                    if (r.ok) {
+                        opendojo::subsystems::mark_session_loaded(true);
+                        seed_export_form_from(d);
+                    }
+                    show_toast(r.message, !r.ok);
+                }
+                ImGui::SameLine();
+                if (destructive_small_button("Delete##delete")) {
+                    g_state.delete_path = d.path;
+                    g_state.delete_name = d.name;
+                    g_state.delete_modal_open_requested = true;
+                }
+
+                ImGui::PopID();
             }
-
-            ImGui::TableSetColumnIndex(1);
-            if (!d.cpu_side.empty()) {
-                ImGui::Text("%s (%s)", d.character.c_str(), d.cpu_side.c_str());
-            } else {
-                ImGui::TextUnformatted(d.character.c_str());
-            }
-
-            ImGui::TableSetColumnIndex(2);
-            ImGui::Text("%zu", d.recording_count);
-
-            ImGui::TableSetColumnIndex(3);
-            if (ImGui::Button("Add##add", ImVec2(-1, 0))) {
-                auto r = opendojo::commands::load_drill(d.path,
-                                                        opendojo::commands::LoadMode::AppendToFree);
-                if (r.ok) opendojo::subsystems::mark_session_loaded(true);
-                show_toast(r.message, !r.ok);
-            }
-
-            ImGui::TableSetColumnIndex(4);
-            if (ImGui::Button("Replace##replace", ImVec2(-1, 0))) {
-                auto r = opendojo::commands::load_drill(d.path,
-                                                        opendojo::commands::LoadMode::ReplaceAll);
-                if (r.ok) opendojo::subsystems::mark_session_loaded(true);
-                show_toast(r.message, !r.ok);
-            }
-
-            ImGui::TableSetColumnIndex(5);
-            if (destructive_button("Delete##delete", ImVec2(-1, 0))) {
-                g_state.delete_path = d.path;
-                g_state.delete_name = d.name;
-                g_state.delete_modal_open_requested = true;
-            }
-
-            ImGui::PopID();
+            ImGui::EndTable();
         }
-        ImGui::EndTable();
+        ImGui::PopStyleVar();  // CellPadding
     }
 
     if (can_filter && visible == 0 && !g_state.drills.empty()) {
@@ -369,11 +453,6 @@ void draw_drills_tab() {
                            "No drills match %s. Toggle \"Show all\" to see every drill.",
                            cpu.character_name.c_str());
     }
-
-    ImGui::Spacing();
-    ImGui::TextDisabled("Add: load into empty recording slots (refuses if too few are free).");
-    ImGui::TextDisabled("Replace: clear all recordings, then load from the drill.");
-    ImGui::TextDisabled("Delete: permanently remove the drill file from opendojo/.");
 
     // ---- Delete confirmation modal --------------------------------------
     // OpenPopup must be called at the same ID-stack scope as
@@ -390,7 +469,7 @@ void draw_drills_tab() {
         ImGui::Spacing();
         ImGui::TextWrapped(
             "This removes the .drill.txt from your opendojo/ folder. "
-            "Other people's copies are unaffected. This can't be undone.");
+            "This can't be undone.");
         ImGui::Spacing();
 
         if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
@@ -479,46 +558,72 @@ void draw_recordings_tab() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Export");
-    ImGui::Spacing();
 
-    ImGui::PushItemWidth(420);
-    ImGui::InputText("Name", g_state.export_name, sizeof(g_state.export_name));
+    // Shared name + description for both Save and Share. Stretches
+    // full width so users get a real text field, not a cramped
+    // 420-pixel one carried over from the old single-column form.
+    ImGui::PushItemWidth(-1);
+    ImGui::InputText("##export_name", g_state.export_name, sizeof(g_state.export_name));
+    nav_recenter();
     ImGui::PopItemWidth();
-    // Description gets its own multi-line box. Sized to ~4 lines at the
-    // current font; ImGui scrolls vertically once the user exceeds that.
-    ImGui::InputTextMultiline(
-        "Description (optional)", g_state.export_description, sizeof(g_state.export_description),
-        ImVec2(420, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2));
-    ImGui::TextDisabled("Leave name blank for an auto timestamp.");
+    ImGui::TextDisabled("Name (leave blank for an auto timestamp)");
 
     ImGui::Spacing();
 
+    ImGui::InputTextMultiline(
+        "##export_desc", g_state.export_description, sizeof(g_state.export_description),
+        ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2));
+    nav_recenter();
+    ImGui::TextDisabled("Description (optional)");
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+
+    // ---- Two-card layout: Save locally | Share with community ------------
+    // Cards are equal width and equal height so neither feels secondary.
+    // Card height is fixed to fit the taller of the two (the Share card
+    // with tags + difficulty + handle + button + status line); the Save
+    // card pads its top so its button bottom-aligns near the Share button.
     const bool can_export = populated > 0;
+    const float gap = ImGui::GetStyle().ItemSpacing.x * 2.0f;
+    const float total_w = ImGui::GetContentRegionAvail().x;
+    const float col_w = (total_w - gap) * 0.5f;
+    const float line = ImGui::GetTextLineHeightWithSpacing();
+    const float card_h = line * 12.5f;
+
+    constexpr ImGuiWindowFlags kCardWFlags = ImGuiWindowFlags_NoScrollbar |
+                                             ImGuiWindowFlags_NoScrollWithMouse;
+
+    // -- Save locally card --
+    ImGui::BeginChild("save_card", ImVec2(col_w, card_h), ImGuiChildFlags_Border, kCardWFlags);
+    ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Save locally");
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "Writes a .drill.txt file to your opendojo/ folder so you can "
+        "load it again from the Drills tab.");
+    ImGui::Spacing();
     if (!can_export) ImGui::BeginDisabled();
-    if (ImGui::Button("Export", ImVec2(0, 0))) {
+    if (ImGui::Button("Save drill", ImVec2(-FLT_MIN, 0))) {
         auto r = opendojo::commands::export_current_slots(g_state.export_name,
                                                           g_state.export_description,
                                                           "" /* character: always autodetected */,
                                                           "" /* cpu_side: always use detection */);
         show_toast(r.message, !r.ok);
-        if (r.ok) {
-            g_state.export_name[0] = 0;
-            g_state.export_description[0] = 0;
-            g_state.drills_dirty = true;
-        }
+        if (r.ok) g_state.drills_dirty = true;
     }
     if (!can_export) ImGui::EndDisabled();
-    if (!can_export) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(record or pick a move first)");
-    }
+    if (!can_export) { ImGui::TextDisabled("(record or pick a move first)"); }
+    ImGui::EndChild();
 
-    // Upload-to-cloud entry point. Disabled when offline / not configured
-    // or when there's nothing to upload. The cloud module owns the
-    // worker dispatch + toast plumbing.
-    opendojo::cloud::ui::draw_upload_export_row(can_export, g_state.export_name,
-                                                g_state.export_description);
+    ImGui::SameLine(0, gap);
+
+    // -- Share with community card --
+    ImGui::BeginChild("share_card", ImVec2(col_w, card_h), ImGuiChildFlags_Border, kCardWFlags);
+    ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Share with community");
+    ImGui::Spacing();
+    opendojo::cloud::ui::draw_share_card_body(can_export, g_state.export_name,
+                                              g_state.export_description);
+    ImGui::EndChild();
 }
 
 // Render a user-readable label for a Win32 virtual-key code. Uses
@@ -673,12 +778,31 @@ void draw_about_tab() {
                 pad_btn_name(opendojo::config::toggle_pad_btn()));
     ImGui::Spacing();
     ImGui::TextDisabled("Drill files + settings live in opendojo/ next to the game executable.");
-    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    ImGui::TextWrapped(
-        "Your cloud identity is stored in %%LOCALAPPDATA%%\\OpenDojo and is tied to this "
-        "computer. It survives game updates and reinstalls, but won't carry over to another "
-        "PC.");
-    ImGui::PopStyleColor();
+    if (ImGui::Button("Open opendojo/ folder")) {
+        // Launch the system explorer.exe with the folder as its
+        // argument. Avoiding ShellExecute keeps us off shell32 and
+        // off the verb-resolution / file-association code path —
+        // we always invoke a known absolute exe with a single arg
+        // we control. Path is the game-dir/opendojo subfolder; NTFS
+        // disallows '"' so simple quoting is safe. Errors are
+        // ignored; the user can fall back to Steam's "Browse local
+        // files" if launch fails.
+        wchar_t windir[MAX_PATH];
+        UINT n = GetSystemWindowsDirectoryW(windir, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::wstring exe = std::wstring(windir) + L"\\explorer.exe";
+            std::wstring cmd = L"\"" + exe + L"\" \"" + opendojo::commands::drills_dir().wstring() +
+                               L"\"";
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            PROCESS_INFORMATION pi{};
+            if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                               nullptr, &si, &pi)) {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            }
+        }
+    }
 }
 
 // ---- Toast (transient bottom-of-window status line) ------------------------
@@ -721,11 +845,15 @@ void draw() {
     // at every resolution. Clamped so it doesn't get absurdly small
     // on tiny windows or absurdly large on ultrawide.
     auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
-    // Width minimum bumped from 900 to 1100 so the Browse tab's
+    // Width minimum bumped from 900 to 1100 so the Cloud tab's
     // character combo + tag chip row + sort/difficulty filters fit
-    // on one row without wrapping.
+    // on one row without wrapping. Height was bumped from 0.60/540
+    // so the Export tab's two cards + form sit fully in view on
+    // standard 1080p displays without forcing a window scroll —
+    // makes gamepad nav much easier since fewer focused widgets
+    // park at the viewport edge.
     const ImVec2 size(clampf(vp->WorkSize.x * 0.55f, 1100.0f, 1500.0f),
-                      clampf(vp->WorkSize.y * 0.60f, 540.0f, 1000.0f));
+                      clampf(vp->WorkSize.y * 0.72f, 700.0f, 1150.0f));
     const ImVec2 pos(vp->WorkPos.x + (vp->WorkSize.x - size.x) * 0.5f,
                      vp->WorkPos.y + (vp->WorkSize.y - size.y) * 0.5f);
     ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
@@ -759,7 +887,7 @@ void draw() {
         void (*draw)();
     };
     const TabDef tabs[] = {
-        {"Drills", &draw_drills_tab},     {"Browse", &opendojo::cloud::ui::draw_browse_tab},
+        {"Drills", &draw_drills_tab},     {"Cloud", &opendojo::cloud::ui::draw_cloud_tab},
         {"Export", &draw_recordings_tab}, {"Settings", &draw_settings_tab},
         {"About", &draw_about_tab},
     };
