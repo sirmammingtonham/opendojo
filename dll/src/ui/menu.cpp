@@ -160,19 +160,6 @@ bool pin_toggle_button(const char* filename, bool currently_pinned) {
     return clicked;
 }
 
-// Call immediately after a widget that lives in a scrollable region.
-// While gamepad/keyboard nav is active and this widget holds focus,
-// keeps the focused item centered in its scroll parent instead of
-// at the edge — so the user sees content above AND below it before
-// they have to nav into it. No effect when the user is on mouse
-// (io.NavActive is false), and a no-op when the item isn't focused.
-// Re-asserting SetScrollHereY each frame doesn't fight stick-scroll
-// in practice because controller users navigate by DPad which moves
-// focus rather than scrolling the window directly.
-void nav_recenter() {
-    if (ImGui::IsItemFocused() && ImGui::GetIO().NavActive) { ImGui::SetScrollHereY(0.5f); }
-}
-
 void drain_pending_ui_ops() {
     std::vector<PendingUiOps::QueuedToast> toasts;
     {
@@ -245,6 +232,7 @@ void draw_drills_tab() {
     }
 
     if (ImGui::Button("Refresh")) g_state.drills_dirty = true;
+    nav_recenter();
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
@@ -256,17 +244,20 @@ void draw_drills_tab() {
             g_state.sort_mode = State::Sort::Name;
             g_state.drills_dirty = true;
         }
+        nav_recenter();
         ImGui::SameLine();
         if (ImGui::RadioButton("Newest", &sort_idx, static_cast<int>(State::Sort::Newest))) {
             g_state.sort_mode = State::Sort::Newest;
             g_state.drills_dirty = true;
         }
+        nav_recenter();
     }
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
     if (cpu.detected) {
         ImGui::Checkbox("Show all", &g_state.show_all_drills);
+        nav_recenter();
         ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();
@@ -333,6 +324,7 @@ void draw_drills_tab() {
                 if (r.ok) opendojo::subsystems::mark_session_loaded(true);
                 show_toast(r.message, !r.ok);
             }
+            nav_recenter();
             ImGui::SameLine();
             if (ImGui::Button("Save as drill##autosave_save")) {
                 std::string new_name = d.character.empty() ? "saved" : d.character + "_saved";
@@ -340,12 +332,14 @@ void draw_drills_tab() {
                 show_toast(r.message, !r.ok);
                 if (r.ok) g_state.drills_dirty = true;
             }
+            nav_recenter();
             ImGui::SameLine();
             if (destructive_button("Delete##autosave_delete")) {
                 g_state.delete_path = d.path;
                 g_state.delete_name = d.name;
                 g_state.delete_modal_open_requested = true;
             }
+            nav_recenter();
             ImGui::PopID();
         }
         ImGui::Spacing();
@@ -397,6 +391,7 @@ void draw_drills_tab() {
                 if (pin_toggle_button(fname.c_str(), pinned)) {
                     g_state.drills_dirty = true;  // re-sort: pin/unpin changes group
                 }
+                nav_recenter();
                 ImGui::SameLine();
                 ImGui::TextUnformatted(d.name.c_str());
                 if (!d.description.empty() && ImGui::IsItemHovered()) {
@@ -423,6 +418,7 @@ void draw_drills_tab() {
                     }
                     show_toast(r.message, !r.ok);
                 }
+                nav_recenter();
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Replace##replace")) {
                     auto r = opendojo::commands::load_drill(
@@ -433,12 +429,14 @@ void draw_drills_tab() {
                     }
                     show_toast(r.message, !r.ok);
                 }
+                nav_recenter();
                 ImGui::SameLine();
                 if (destructive_small_button("Delete##delete")) {
                     g_state.delete_path = d.path;
                     g_state.delete_name = d.name;
                     g_state.delete_modal_open_requested = true;
                 }
+                nav_recenter();
 
                 ImGui::PopID();
             }
@@ -585,45 +583,53 @@ void draw_recordings_tab() {
     // with tags + difficulty + handle + button + status line); the Save
     // card pads its top so its button bottom-aligns near the Share button.
     const bool can_export = populated > 0;
-    const float gap = ImGui::GetStyle().ItemSpacing.x * 2.0f;
-    const float total_w = ImGui::GetContentRegionAvail().x;
-    const float col_w = (total_w - gap) * 0.5f;
-    const float line = ImGui::GetTextLineHeightWithSpacing();
-    const float card_h = line * 12.5f;
 
-    constexpr ImGuiWindowFlags kCardWFlags = ImGuiWindowFlags_NoScrollbar |
-                                             ImGuiWindowFlags_NoScrollWithMouse;
+    // 2-column table for the cards instead of two BeginChild blocks.
+    // The crucial difference: table cells render content INTO the
+    // current window, so nav_recenter() called on widgets inside
+    // (e.g. the Save button) drives the menu window's scroll. With
+    // BeginChild the widgets sat in a no-scroll child window and our
+    // SetScrollY calls had no effect on the parent — focused widgets
+    // at the bottom of the tab couldn't snap the scrollbar to its rail.
+    //
+    // We use BordersInner/Outer for the card look and bump CellPadding
+    // so content sits with the same breathing room a child window's
+    // WindowPadding would have given it.
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(12.0f, 12.0f));
+    const ImGuiTableFlags kCardTableFlags = ImGuiTableFlags_BordersInnerV |
+                                            ImGuiTableFlags_BordersOuter |
+                                            ImGuiTableFlags_SizingStretchSame;
+    if (ImGui::BeginTable("cards", 2, kCardTableFlags)) {
+        // -- Save locally card --
+        ImGui::TableNextColumn();
+        ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Save locally");
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "Writes a .drill.txt file to your opendojo/ folder so you can "
+            "load it again from the Drills tab.");
+        ImGui::Spacing();
+        if (!can_export) ImGui::BeginDisabled();
+        if (ImGui::Button("Save drill", ImVec2(-FLT_MIN, 0))) {
+            auto r = opendojo::commands::export_current_slots(
+                g_state.export_name, g_state.export_description,
+                "" /* character: always autodetected */, "" /* cpu_side: always use detection */);
+            show_toast(r.message, !r.ok);
+            if (r.ok) g_state.drills_dirty = true;
+        }
+        nav_recenter();
+        if (!can_export) ImGui::EndDisabled();
+        if (!can_export) { ImGui::TextDisabled("(record or pick a move first)"); }
 
-    // -- Save locally card --
-    ImGui::BeginChild("save_card", ImVec2(col_w, card_h), ImGuiChildFlags_Border, kCardWFlags);
-    ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Save locally");
-    ImGui::Spacing();
-    ImGui::TextWrapped(
-        "Writes a .drill.txt file to your opendojo/ folder so you can "
-        "load it again from the Drills tab.");
-    ImGui::Spacing();
-    if (!can_export) ImGui::BeginDisabled();
-    if (ImGui::Button("Save drill", ImVec2(-FLT_MIN, 0))) {
-        auto r = opendojo::commands::export_current_slots(g_state.export_name,
-                                                          g_state.export_description,
-                                                          "" /* character: always autodetected */,
-                                                          "" /* cpu_side: always use detection */);
-        show_toast(r.message, !r.ok);
-        if (r.ok) g_state.drills_dirty = true;
+        // -- Share with community card --
+        ImGui::TableNextColumn();
+        ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Share with community");
+        ImGui::Spacing();
+        opendojo::cloud::ui::draw_share_card_body(can_export, g_state.export_name,
+                                                  g_state.export_description);
+
+        ImGui::EndTable();
     }
-    if (!can_export) ImGui::EndDisabled();
-    if (!can_export) { ImGui::TextDisabled("(record or pick a move first)"); }
-    ImGui::EndChild();
-
-    ImGui::SameLine(0, gap);
-
-    // -- Share with community card --
-    ImGui::BeginChild("share_card", ImVec2(col_w, card_h), ImGuiChildFlags_Border, kCardWFlags);
-    ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Share with community");
-    ImGui::Spacing();
-    opendojo::cloud::ui::draw_share_card_body(can_export, g_state.export_name,
-                                              g_state.export_description);
-    ImGui::EndChild();
+    ImGui::PopStyleVar();
 }
 
 // Render a user-readable label for a Win32 virtual-key code. Uses
@@ -836,6 +842,29 @@ void queue_drills_refresh() {
     g_pending.drills_dirty.store(true);
 }
 
+// Public — called from cloud_ui.cpp's share-card widgets too. See the
+// header for behavior. Single static tracks last-focused id across
+// every call site in the process; at most one IsItemFocused() returns
+// true per frame, so a single tracker is sufficient.
+void nav_recenter() {
+    if (!ImGui::IsItemFocused() || !ImGui::GetIO().NavActive) return;
+    static ImGuiID s_last = 0;
+    const ImGuiID id = ImGui::GetItemID();
+    if (id == 0 || id == s_last) return;
+    s_last = id;
+
+    const float win_h = ImGui::GetWindowHeight();
+    const float scroll_max = ImGui::GetScrollMaxY();
+    if (scroll_max <= 0.0f) return;
+    const float item_top = ImGui::GetItemRectMin().y - ImGui::GetWindowPos().y +
+                           ImGui::GetScrollY();
+    const float item_h = ImGui::GetItemRectSize().y;
+    float target = item_top + item_h * 0.5f - win_h * 0.5f;
+    if (target < 0.0f) target = 0.0f;
+    if (target > scroll_max) target = scroll_max;
+    ImGui::SetScrollY(target);
+}
+
 void draw() {
     drain_pending_ui_ops();
     refresh_drills_if_needed();
@@ -903,7 +932,14 @@ void draw() {
         for (int i = 0; i < kTabCount; ++i) {
             ImGuiTabItemFlags flags = 0;
             if (i == g_state.pending_tab) flags |= ImGuiTabItemFlags_SetSelected;
-            if (ImGui::BeginTabItem(tabs[i].name, nullptr, flags)) {
+            const bool tab_open = ImGui::BeginTabItem(tabs[i].name, nullptr, flags);
+            // Snap window scroll to the top when nav focus lands on a
+            // tab item (e.g. user DPad-up'd past all content). Tab items
+            // sit at the top of the window's content area, so this
+            // resolves the "nav to top tabs leaves a vertical gap"
+            // gap that ImGui's default scroll-into-view would leave.
+            nav_recenter();
+            if (tab_open) {
                 g_state.active_tab = i;
                 // First-frame focus on the initial tab: anchor the nav
                 // cursor so keyboard/gamepad can move around immediately.

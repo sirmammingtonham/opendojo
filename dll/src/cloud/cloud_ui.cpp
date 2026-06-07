@@ -829,6 +829,7 @@ void draw_share_card_body(bool can_export, const char* name, const char* descrip
             ImGui::TableNextColumn();
             ImGui::PushID(i);
             ImGui::Checkbox(kCategories[i].label, &g_upload.category_picks[i]);
+            opendojo::menu::nav_recenter();
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -842,6 +843,7 @@ void draw_share_card_body(bool can_export, const char* name, const char* descrip
         combo_item_width(kUploadDifficultyLabels, IM_ARRAYSIZE(kUploadDifficultyLabels)));
     ImGui::Combo("##upload_diff", &g_upload.difficulty_idx, kUploadDifficultyLabels,
                  IM_ARRAYSIZE(kUploadDifficultyLabels));
+    opendojo::menu::nav_recenter();
     ImGui::PopItemWidth();
 
     ImGui::Spacing();
@@ -863,6 +865,7 @@ void draw_share_card_body(bool can_export, const char* name, const char* descrip
                       ImVec2(-FLT_MIN, 0))) {
         kick_upload(name ? name : "", description ? description : "");
     }
+    opendojo::menu::nav_recenter();
     if (disabled) ImGui::EndDisabled();
 
     // Persistent last-upload status — shown until the next upload

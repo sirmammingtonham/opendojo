@@ -297,13 +297,18 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
     cfg.OversampleV = 2;
     cfg.PixelSnapH = true;
 
-    // Default Latin + a tiny handful of symbol glyphs the menu uses:
-    // U+2605/2606 (★/☆) for the Drills tab pin toggle. Storage must
-    // outlive font load — ImGui holds a pointer to this array until
-    // the texture atlas is built.
-    static const ImWchar kGlyphRanges[] = {
-        0x0020, 0x00FF,  // Basic Latin + Latin-1 Supplement (matches GetGlyphRangesDefault)
-        0x2605, 0x2606,  // BLACK STAR, WHITE STAR
+    // Static so the pointers outlive the AddFont* calls. ImGui holds
+    // a reference to these arrays until the texture atlas is built.
+    static const ImWchar kLatinRange[] = {
+        0x0020,
+        0x00FF,  // Basic Latin + Latin-1 Supplement (matches GetGlyphRangesDefault)
+        0,
+    };
+    // Glyphs we want but the primary text font (Segoe UI) does not
+    // ship: pulled in from Segoe UI Symbol via MergeMode below.
+    static const ImWchar kSymbolRange[] = {
+        0x2605,
+        0x2606,  // BLACK STAR, WHITE STAR (Drills tab pin toggle)
         0,
     };
 
@@ -311,13 +316,34 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) return false;
         auto utf8 = p.string();
-        ImFont* fnt = io.Fonts->AddFontFromFileTTF(utf8.c_str(), pixel_size, &cfg, kGlyphRanges);
+        ImFont* fnt = io.Fonts->AddFontFromFileTTF(utf8.c_str(), pixel_size, &cfg, kLatinRange);
         if (!fnt) {
             OPENDOJO_LOG("render_hook: AddFontFromFileTTF failed for %s (%s)", utf8.c_str(), label);
             return false;
         }
         OPENDOJO_LOG("render_hook: loaded %s font %s @ %.1fpx", label, utf8.c_str(), pixel_size);
         return true;
+    };
+
+    // Merge symbol glyphs from Segoe UI Symbol onto whatever primary
+    // font we ended up with. Segoe UI Symbol ships with every modern
+    // Windows install and contains the geometric shapes Segoe UI
+    // itself doesn't include (★, ☆, ▲, etc).
+    auto merge_symbols = [&]() {
+        wchar_t windir[MAX_PATH];
+        if (!GetWindowsDirectoryW(windir, MAX_PATH)) return;
+        auto sym = std::filesystem::path(windir) / L"Fonts" / L"seguisym.ttf";
+        std::error_code ec;
+        if (!std::filesystem::exists(sym, ec)) {
+            OPENDOJO_LOG("render_hook: seguisym.ttf missing — symbol glyphs may render as '?'");
+            return;
+        }
+        ImFontConfig merge = cfg;
+        merge.MergeMode = true;
+        auto utf8 = sym.string();
+        if (io.Fonts->AddFontFromFileTTF(utf8.c_str(), pixel_size, &merge, kSymbolRange)) {
+            OPENDOJO_LOG("render_hook: merged Segoe UI Symbol for symbol glyphs");
+        }
     };
 
     wchar_t exe[MAX_PATH];
@@ -328,13 +354,19 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
                              .append(L"OpenDojo")
                              .append(L"font")
                              .append(L"opendojo.ttf");
-        if (try_path(user_font, "user-override")) return;
+        if (try_path(user_font, "user-override")) {
+            merge_symbols();
+            return;
+        }
     }
 
     wchar_t windir[MAX_PATH];
     if (GetWindowsDirectoryW(windir, MAX_PATH)) {
         auto segoe = std::filesystem::path(windir) / L"Fonts" / L"segoeui.ttf";
-        if (try_path(segoe, "Segoe UI")) return;
+        if (try_path(segoe, "Segoe UI")) {
+            merge_symbols();
+            return;
+        }
     }
 
     OPENDOJO_LOG("render_hook: no TTF font available — using ImGui default");

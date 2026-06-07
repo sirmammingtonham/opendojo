@@ -21,4 +21,14 @@ void invalidate();
 void queue_toast(std::string text, bool is_error);
 void queue_drills_refresh();
 
+// Call immediately after a widget that lives in a scrollable region.
+// On the frame gamepad/keyboard nav focuses this widget, scrolls the
+// active ImGui window so the widget sits centered in the viewport,
+// snapping flush to the scroll extremes when it's the first/last
+// focusable item. No-op for mouse users (gated on io.NavActive) and
+// fires only once per focus change so it doesn't fight an editing
+// user's wheel scroll. Exposed so cloud_ui's share-card widgets can
+// drive the parent scroll the same way.
+void nav_recenter();
+
 }  // namespace opendojo::menu
