@@ -329,7 +329,7 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
     if (g_upload.difficulty_idx > 0 && g_upload.difficulty_idx <= kDifficultyCount) {
         picked_difficulty = kDifficulties[g_upload.difficulty_idx - 1].id;
     }
-    std::string version = opendojo::cloud::game_version();
+    std::string dll_ver = opendojo::cloud::dll_version();
     // Resolve the author handle once on the render thread. current()
     // touches steam_api64.dll via GetProcAddress; safer to do it here
     // where DLL state is well-defined than from the worker thread.
@@ -339,7 +339,7 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
     opendojo::cloud::worker::submit([payload = std::move(p),
                                      categories = std::move(picked_categories),
                                      difficulty = std::move(picked_difficulty),
-                                     version = std::move(version), author = std::move(author)]() {
+                                     dll_ver = std::move(dll_ver), author = std::move(author)]() {
         opendojo::cloud::api::SubmitArgs args;
         args.name = payload.name;
         args.description = payload.description;
@@ -349,7 +349,7 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
         args.content = payload.text;
         args.categories = categories;
         args.difficulty = difficulty;
-        args.game_version = version;
+        args.dll_version = dll_ver;
         args.author_handle = author;
 
         auto r = opendojo::cloud::api::submit_drill(args);
@@ -536,14 +536,13 @@ void draw_browse_tab() {
         return;
     }
 
-    // Snapshot liked-session set + current game version once so the
-    // table loop reads consistent values.
+    // Snapshot liked-session set so the table loop reads a
+    // consistent view this frame.
     std::set<std::string> liked_now;
     {
         std::lock_guard lk(g_browse.mtx);
         liked_now = g_browse.liked_session;
     }
-    const std::string& current_version = opendojo::cloud::game_version();
 
     const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
@@ -644,24 +643,12 @@ void draw_browse_tab() {
                 ImGui::PopStyleColor();
             }
 
-            // ---- Character + game version --------------------------
+            // ---- Character ------------------------------------------
             ImGui::TableSetColumnIndex(1);
             if (!d.cpu_side.empty()) {
                 ImGui::Text("%s (%s)", d.character.c_str(), d.cpu_side.c_str());
             } else {
                 ImGui::TextUnformatted(d.character.c_str());
-            }
-            if (!d.game_version.empty()) {
-                const bool mismatch = !current_version.empty() && d.game_version != current_version;
-                ImGui::TextColored(mismatch ? ImVec4(1.0f, 0.55f, 0.40f, 1)
-                                            : ImVec4(0.65f, 0.65f, 0.65f, 1),
-                                   "v%s", d.game_version.c_str());
-                if (mismatch && ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(
-                        "Recorded on Tekken v%s — your build targets v%s. "
-                        "Loading may fail or play back incorrectly.",
-                        d.game_version.c_str(), current_version.c_str());
-                }
             }
 
             // ---- Difficulty badge ----------------------------------
@@ -819,10 +806,6 @@ void draw_upload_export_row(bool can_export, const char* name, const char* descr
     ImGui::Combo("##upload_diff", &g_upload.difficulty_idx, kUploadDifficultyLabels,
                  IM_ARRAYSIZE(kUploadDifficultyLabels));
     ImGui::PopItemWidth();
-    ImGui::SameLine();
-    ImGui::TextDisabled("|");
-    ImGui::SameLine();
-    ImGui::TextDisabled("Game version: v%s", opendojo::cloud::game_version().c_str());
 
     ImGui::Spacing();
 

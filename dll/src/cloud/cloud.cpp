@@ -9,13 +9,17 @@
 #ifndef OPENDOJO_TEKKEN_VERSION
 #define OPENDOJO_TEKKEN_VERSION "unknown"
 #endif
+#ifndef OPENDOJO_DLL_VERSION
+#define OPENDOJO_DLL_VERSION "0.0.0"
+#endif
 
 namespace opendojo::cloud {
 
 namespace {
 const std::string g_base_url{OPENDOJO_CLOUD_URL};
 const std::string g_proxy_key{OPENDOJO_CLOUD_PROXY_KEY};
-const std::string g_game_version{OPENDOJO_TEKKEN_VERSION};
+const std::string g_confirmed_tekken_version{OPENDOJO_TEKKEN_VERSION};
+const std::string g_dll_version{OPENDOJO_DLL_VERSION};
 
 std::string strip_trailing_slash(const std::string& s) {
     if (!s.empty() && s.back() == '/') return s.substr(0, s.size() - 1);
@@ -34,8 +38,12 @@ const std::string& proxy_key() {
     return g_proxy_key;
 }
 
-const std::string& game_version() {
-    return g_game_version;
+const std::string& confirmed_tekken_version() {
+    return g_confirmed_tekken_version;
+}
+
+const std::string& dll_version() {
+    return g_dll_version;
 }
 
 std::string rest_url() {

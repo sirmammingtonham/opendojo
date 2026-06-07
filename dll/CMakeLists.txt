@@ -171,17 +171,18 @@ set(OPENDOJO_CLOUD_URL ""
 set(OPENDOJO_CLOUD_PROXY_KEY ""
     CACHE STRING "OpenDojo Cloud access key")
 
-# Tekken patch version this DLL targets. Recorded against every drill
-# uploaded from this build, so the Browse tab can warn when downloading
-# a drill recorded on an incompatible patch. Bump when the mod's
-# signatures.cpp / offsets are updated for a new game patch.
+# Tekken patch this DLL is *confirmed working on*. Purely informational —
+# shown in the About tab so users know which patch this build was tested
+# against. NOT read from the running game and NOT recorded on uploads;
+# bump it manually when you finish validating a new patch.
 set(OPENDOJO_TEKKEN_VERSION "3.01.01"
-    CACHE STRING "Tekken 8 version this DLL was built for (free-form, e.g. 3.00.02)")
+    CACHE STRING "Tekken 8 patch this DLL was confirmed working on")
 
 target_compile_definitions(opendojo PRIVATE
     "OPENDOJO_CLOUD_URL=\"${OPENDOJO_CLOUD_URL}\""
     "OPENDOJO_CLOUD_PROXY_KEY=\"${OPENDOJO_CLOUD_PROXY_KEY}\""
-    "OPENDOJO_TEKKEN_VERSION=\"${OPENDOJO_TEKKEN_VERSION}\"")
+    "OPENDOJO_TEKKEN_VERSION=\"${OPENDOJO_TEKKEN_VERSION}\""
+    "OPENDOJO_DLL_VERSION=\"${PROJECT_VERSION}\"")
 
 # Output filename = the proxy DLL name we're impersonating, no "lib" prefix.
 set_target_properties(opendojo PROPERTIES

@@ -29,7 +29,6 @@ struct DrillSummary {
     std::string author_handle;            // empty if null
     std::vector<std::string> categories;  // canonical ids; empty if untagged
     std::string difficulty;               // "" / "beginner" / "intermediate" / "advanced"
-    std::string game_version;             // free-form, e.g. "3.00.02"; empty if unknown
     std::string created_at;               // ISO-8601 from server; for UI only
     bool is_mine = false;                 // server says: uploader_id == auth.uid()
 };
@@ -89,7 +88,7 @@ struct SubmitArgs {
     std::string author_handle;            // optional self-reported handle
     std::vector<std::string> categories;  // canonical ids
     std::string difficulty;               // canonical id; empty = unset
-    std::string game_version;             // pulled from cloud::game_version()
+    std::string dll_version;              // pulled from cloud::dll_version()
 };
 
 struct SubmitResult {

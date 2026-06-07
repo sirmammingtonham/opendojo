@@ -18,11 +18,13 @@ const std::string& base_url();
 // Access key sent with each request.
 const std::string& proxy_key();
 
-// Tekken patch the DLL was built for (e.g. "3.00.02"). Stamped onto
-// every uploaded drill so future patches' incompatible drills can
-// be flagged on the Browse tab. Falls back to "unknown" if the
-// CMake cache variable wasn't set.
-const std::string& game_version();
+// Tekken patch this DLL was *confirmed working on* (e.g. "3.01.01").
+const std::string& confirmed_tekken_version();
+
+// This DLL's own build version (CMake PROJECT_VERSION, e.g. "0.1.0").
+// Recorded on every uploaded drill so the server can tell which
+// client revision produced a given recording.
+const std::string& dll_version();
 
 // PostgREST endpoint: <base>/rest/v1
 std::string rest_url();

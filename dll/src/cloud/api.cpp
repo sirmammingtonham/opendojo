@@ -136,7 +136,6 @@ DrillSummary parse_summary(const json& row) {
     s.likes = row.value("likes", static_cast<std::int64_t>(0));
     s.author_handle = row.value("author_handle", "");
     s.difficulty = row.value("difficulty", "");
-    s.game_version = row.value("game_version", "");
     s.created_at = row.value("created_at", "");
     s.is_mine = row.value("is_mine", false);
     // categories is a Postgres text[] coming through PostgREST as a
@@ -265,7 +264,7 @@ SubmitResult submit_drill(const SubmitArgs& a) {
     if (!a.author_handle.empty()) body["author_handle"] = a.author_handle;
     body["categories"] = a.categories;  // empty array is fine
     if (!a.difficulty.empty()) body["difficulty"] = a.difficulty;
-    if (!a.game_version.empty()) body["game_version"] = a.game_version;
+    if (!a.dll_version.empty()) body["dll_version"] = a.dll_version;
 
     auto res = opendojo::cloud::http::post(url, standard_headers(), body.dump());
     if (auto fail = classify_http_failure(res, "upload your drill", /*trust_body=*/true);
