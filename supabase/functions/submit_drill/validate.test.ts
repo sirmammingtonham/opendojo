@@ -79,7 +79,7 @@ Deno.test("validate: full-featured drill", () => {
         cpu_side: "p2",
         categories: ["reaction", "punishment"],
         difficulty: "intermediate",
-        game_version: "3.00.02",
+        dll_version: "0.1.0",
         recordings_count: 3,
         content: makeContent(3),
     }));
@@ -347,18 +347,18 @@ Deno.test("difficulty: valid", () => {
     expectOk(body({ difficulty: "advanced" }));
 });
 
-// ---- game_version ----------------------------------------------------------
+// ---- dll_version -----------------------------------------------------------
 
-Deno.test("game_version: dot-separated ok", () => {
-    expectOk(body({ game_version: "3.00.02" }));
+Deno.test("dll_version: dot-separated ok", () => {
+    expectOk(body({ dll_version: "0.1.0" }));
 });
 
-Deno.test("game_version: spaces rejected", () => {
-    expectErr(body({ game_version: "3 00 02" }), "game_version");
+Deno.test("dll_version: spaces rejected", () => {
+    expectErr(body({ dll_version: "0 1 0" }), "dll_version");
 });
 
-Deno.test("game_version: too long", () => {
-    expectErr(body({ game_version: "x".repeat(25) }), "game_version");
+Deno.test("dll_version: too long", () => {
+    expectErr(body({ dll_version: "x".repeat(25) }), "dll_version");
 });
 
 // ---- low-level helper tests -----------------------------------------------

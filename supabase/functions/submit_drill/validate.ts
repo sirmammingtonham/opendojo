@@ -27,9 +27,9 @@ export const ALLOWED_DIFFICULTIES = new Set([
 
 // Tight grammars for machine-format fields. character matches the
 // [a-z][a-z0-9_]* shape that players::character_name() produces;
-// game_version is the same alphabet we'd expect from a build tag.
+// dll_version is the same alphabet we'd expect from a build tag.
 const RE_CHARACTER    = /^[a-z][a-z0-9_]{0,31}$/;
-const RE_GAME_VERSION = /^[a-zA-Z0-9._-]{1,24}$/;
+const RE_DLL_VERSION  = /^[a-zA-Z0-9._-]{1,24}$/;
 
 // Code-point classifier for "dangerous chars in user-visible text".
 // Inlined char-code switch instead of a regex literal so the source
@@ -103,7 +103,7 @@ export interface SubmitBody {
     author_handle?: unknown;
     categories?: unknown;
     difficulty?: unknown;
-    game_version?: unknown;
+    dll_version?: unknown;
 }
 
 export type Validated = {
@@ -116,7 +116,7 @@ export type Validated = {
     author_handle: string | null;
     categories: string[];
     difficulty: string | null;
-    game_version: string | null;
+    dll_version: string | null;
 };
 
 // Trim + cap-length; reject if blank or too long. Returns null on
@@ -308,13 +308,13 @@ export function validate(body: SubmitBody): { ok: Validated } | { err: string } 
         difficulty = body.difficulty;
     }
 
-    let game_version: string | null = null;
-    if (body.game_version != null) {
-        if (typeof body.game_version !== "string"
-            || !RE_GAME_VERSION.test(body.game_version)) {
-            return { err: "game_version must match [A-Za-z0-9._-]{1,24}" };
+    let dll_version: string | null = null;
+    if (body.dll_version != null) {
+        if (typeof body.dll_version !== "string"
+            || !RE_DLL_VERSION.test(body.dll_version)) {
+            return { err: "dll_version must match [A-Za-z0-9._-]{1,24}" };
         }
-        game_version = body.game_version;
+        dll_version = body.dll_version;
     }
 
     return {
@@ -328,7 +328,7 @@ export function validate(body: SubmitBody): { ok: Validated } | { err: string } 
             author_handle,
             categories,
             difficulty,
-            game_version,
+            dll_version,
         },
     };
 }

@@ -171,7 +171,7 @@ Deno.serve(async (req) => {
             author_handle:    drill.author_handle,
             categories:       drill.categories,
             difficulty:       drill.difficulty,
-            game_version:     drill.game_version,
+            dll_version:      drill.dll_version,
             uploader_id:      userId,
         }, { onConflict: "content_hash", ignoreDuplicates: false })
         .select("id")

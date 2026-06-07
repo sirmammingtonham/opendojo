@@ -77,11 +77,11 @@ create table drills (
                       ),
     difficulty        text references drill_difficulties(id) on delete set null,
 
-    -- Tekken patch version this drill was recorded against. The slot
-    -- format and movelist IDs are version-sensitive — drills don't
-    -- cleanly cross-load between versions. The mod fills this from a
-    -- compile-time constant (OPENDOJO_TEKKEN_VERSION).
-    game_version      text check (char_length(game_version) <= 24),
+    -- OpenDojo DLL version that produced this drill (CMake
+    -- PROJECT_VERSION, e.g. "0.1.0"). Stamped by the client at
+    -- upload time so the server can tell which client revision
+    -- recorded a given drill; not surfaced to listing clients.
+    dll_version       text check (char_length(dll_version) <= 24),
 
     -- The actual drill payload. Inline TEXT; Postgres TOAST handles
     -- compression + out-of-line storage. Hard-capped at 64 KB so a
@@ -142,7 +142,7 @@ create        index drills_uploader_idx     on drills (uploader_id);
 create        index drills_search_idx       on drills using gin (search_tsv);
 create        index drills_categories_idx   on drills using gin (categories);
 create        index drills_difficulty_idx   on drills (difficulty);
-create        index drills_version_idx      on drills (game_version);
+create        index drills_version_idx      on drills (dll_version);
 
 -- =============================================================
 -- likes — one row per (user, drill) the user has liked. The
@@ -231,7 +231,6 @@ select
     author_handle,
     categories,
     difficulty,
-    game_version,
     size_bytes,
     downloads,
     likes,
