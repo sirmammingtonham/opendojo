@@ -11,6 +11,11 @@
 //
 // F12 toggles menu visibility (handled by the WndProc hook).
 
+// Forward-declare ImFont in the global namespace so callers don't need
+// to pull in imgui.h just to declare a small_font() pointer. Anyone
+// actually using the returned pointer will already be including imgui.h.
+struct ImFont;
+
 namespace opendojo::render_hook {
 
 // Kick off installation. Spawns a worker thread that waits for d3d12.dll +
@@ -25,5 +30,13 @@ void install();
 void toggle_menu();
 
 bool menu_visible();
+
+// Secondary font rasterized at ~78% of the menu's primary size. For
+// metadata text (description snippets, hashtag chips, footnotes)
+// that should read as quieter than the primary widget labels.
+// Returns nullptr before the menu's ImGui context has been
+// initialized — callers should null-check (or skip the PushFont
+// call if it's null and accept the fallback to the default font).
+::ImFont* small_font();
 
 }  // namespace opendojo::render_hook

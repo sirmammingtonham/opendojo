@@ -17,6 +17,7 @@
 #include "cloud/handle.hpp"
 #include "cloud/worker.hpp"
 #include "commands.hpp"
+#include "hooks/render_hook.hpp"
 #include "players.hpp"
 #include "ui/menu.hpp"
 
@@ -108,6 +109,14 @@ const std::vector<std::string>& roster() {
     return g_roster;
 }
 
+// Cloud tab has two modes selected via the pill toggle at the top.
+// Browse = community drills, full filter row. MyUploads = just the
+// caller's uploads, with Edit/Delete row actions instead of Like/Download.
+enum class Mode {
+    Browse,
+    MyUploads,
+};
+
 // Shared between the render thread (read for drawing) and the cloud
 // worker thread (write on completion). Every field is guarded by
 // `mtx`; we copy out to locals for the draw pass to keep lock scope
@@ -128,6 +137,10 @@ struct BrowseState {
     // inline). Caret toggles membership. Set lives on the render
     // thread; no lock needed since draw_browse_tab is the only writer.
     std::set<std::string> expanded_ids;
+
+    // Currently-active view mode (Browse / MyUploads). Switching modes
+    // resets pagination + re-kicks the list query.
+    Mode mode = Mode::Browse;
 
     // User-controlled inputs live on the render thread, so they don't
     // need mtx. ImGui owns the buffer storage.
@@ -152,6 +165,15 @@ struct BrowseState {
     std::string report_target_name;
     char report_reason_buf[256] = "";
     bool report_modal_open_requested = false;
+
+    // Pending edit target (My uploads). Pre-fill name + description
+    // buffers when the user clicks Edit on a row; the modal reads
+    // these and writes back on Save. ImGui owns the buffer memory.
+    std::string edit_target_id;
+    std::string edit_target_original_name;
+    char edit_name_buf[96] = "";
+    char edit_desc_buf[1024] = "";
+    bool edit_modal_open_requested = false;
 };
 
 BrowseState g_browse;
@@ -241,15 +263,25 @@ int roster_index_of(const std::string& character_name) {
 
 void kick_list() {
     opendojo::cloud::api::ListQuery q;
-    q.search_query = g_browse.search_buf;
-    q.character_filter = resolve_character_filter();
-    for (int i = 0; i < kCategoryCount; ++i) {
-        if (g_browse.category_filter[i]) q.category_filter.emplace_back(kCategories[i].id);
+    if (g_browse.mode == Mode::MyUploads) {
+        // My uploads ignores the community-browse filter row entirely —
+        // every drill here is yours, so character / difficulty / category
+        // narrowing would just hide your own work for no reason. Sort
+        // stays newest-first regardless.
+        q.mine_only = true;
+        q.sort = opendojo::cloud::api::SortOrder::NewestFirst;
+    } else {
+        q.search_query = g_browse.search_buf;
+        q.character_filter = resolve_character_filter();
+        for (int i = 0; i < kCategoryCount; ++i) {
+            if (g_browse.category_filter[i]) q.category_filter.emplace_back(kCategories[i].id);
+        }
+        if (g_browse.difficulty_filter_idx > 0 &&
+            g_browse.difficulty_filter_idx <= kDifficultyCount) {
+            q.difficulty_filter = kDifficulties[g_browse.difficulty_filter_idx - 1].id;
+        }
+        q.sort = sort_from_idx(g_browse.sort_idx);
     }
-    if (g_browse.difficulty_filter_idx > 0 && g_browse.difficulty_filter_idx <= kDifficultyCount) {
-        q.difficulty_filter = kDifficulties[g_browse.difficulty_filter_idx - 1].id;
-    }
-    q.sort = sort_from_idx(g_browse.sort_idx);
     q.offset = g_browse.offset;
 
     {
@@ -273,7 +305,9 @@ void kick_toggle_like(const std::string& drill_id) {
     opendojo::cloud::worker::submit([drill_id]() {
         auto r = opendojo::cloud::api::toggle_like(drill_id);
         if (!r.ok) {
-            opendojo::menu::queue_toast(r.error_message.empty() ? "like failed" : r.error_message,
+            opendojo::menu::queue_toast(r.error_message.empty()
+                                            ? "Couldn't save your like. Please try again."
+                                            : r.error_message,
                                         true);
             return;
         }
@@ -300,7 +334,9 @@ void kick_report(const std::string& drill_id, const std::string& display_name,
     opendojo::cloud::worker::submit([drill_id, display_name, reason]() {
         auto r = opendojo::cloud::api::report_drill(drill_id, reason);
         if (!r.ok) {
-            opendojo::menu::queue_toast(r.error_message.empty() ? "report failed" : r.error_message,
+            opendojo::menu::queue_toast(r.error_message.empty()
+                                            ? "Couldn't submit your report. Please try again."
+                                            : r.error_message,
                                         true);
             return;
         }
@@ -316,13 +352,17 @@ void kick_delete_my_drill(const std::string& drill_id, const std::string& displa
     opendojo::cloud::worker::submit([drill_id, display_name]() {
         auto r = opendojo::cloud::api::delete_my_drill(drill_id);
         if (!r.ok) {
-            opendojo::menu::queue_toast(r.error_message.empty() ? "delete failed" : r.error_message,
+            opendojo::menu::queue_toast(r.error_message.empty()
+                                            ? "Couldn't delete that drill. Please try again."
+                                            : r.error_message,
                                         true);
             return;
         }
         if (!r.deleted) {
-            opendojo::menu::queue_toast(
-                r.error_message.empty() ? "drill not found or not yours" : r.error_message, true);
+            opendojo::menu::queue_toast(r.error_message.empty()
+                                            ? "That drill isn't yours to delete."
+                                            : r.error_message,
+                                        true);
             return;
         }
         // Patch the local cache so the row disappears instantly
@@ -340,18 +380,47 @@ void kick_delete_my_drill(const std::string& drill_id, const std::string& displa
     });
 }
 
+void kick_update_my_drill(const std::string& drill_id, const std::string& name,
+                          const std::string& description) {
+    opendojo::cloud::worker::submit([drill_id, name, description]() {
+        auto r = opendojo::cloud::api::update_my_drill(drill_id, name, description);
+        if (!r.ok || !r.updated) {
+            opendojo::menu::queue_toast(r.error_message.empty()
+                                            ? "Couldn't save your changes. Please try again."
+                                            : r.error_message,
+                                        true);
+            return;
+        }
+        // Patch local cache so the row reflects the new name/desc
+        // instantly without waiting on a list refetch.
+        {
+            std::lock_guard lk(g_browse.mtx);
+            for (auto& d : g_browse.results) {
+                if (d.id == drill_id) {
+                    d.name = name;
+                    d.description = description;
+                    break;
+                }
+            }
+        }
+        opendojo::menu::queue_toast("Saved changes.", false);
+    });
+}
+
 void kick_download(const std::string& drill_id, const std::string& display_name) {
     opendojo::cloud::worker::submit([drill_id, display_name]() {
         auto r = opendojo::cloud::api::get_drill(drill_id);
         if (!r.ok) {
-            opendojo::menu::queue_toast(
-                r.error_message.empty() ? "download failed" : r.error_message, true);
+            opendojo::menu::queue_toast(r.error_message.empty()
+                                            ? "Couldn't download that drill. Please try again."
+                                            : r.error_message,
+                                        true);
             return;
         }
         auto save = opendojo::commands::save_drill_text(
             display_name.empty() ? r.drill.name : display_name, r.drill.content);
         if (!save.ok) {
-            opendojo::menu::queue_toast("downloaded but " + save.message, true);
+            opendojo::menu::queue_toast("Downloaded, but couldn't save it locally.", true);
             return;
         }
         opendojo::menu::queue_toast("Downloaded: " + save.path.filename().string(), false);
@@ -364,9 +433,13 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
     // memory (slot state, CPU detection) under whatever invariants
     // the rest of the menu already relies on. The worker then ships
     // the prepared text without touching the game.
+    // Upload status surfaces exclusively in the Share card's persistent
+    // status line — no queue_toast() calls here. The global toast would
+    // double up with the in-card status whenever the user is on the
+    // Export tab (where uploads originate), and on other tabs the status
+    // is still visible the next time the user revisits Export.
     auto p = opendojo::commands::build_current_slots_payload(name_in, description_in);
     if (!p.ok) {
-        opendojo::menu::queue_toast(p.message, true);
         set_upload_status(p.message, true);
         return;
     }
@@ -387,9 +460,7 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
     // where DLL state is well-defined than from the worker thread.
     std::string author = opendojo::cloud::handle::current();
     if (author.empty()) {
-        const char* msg = "Set an author handle in Settings before uploading.";
-        opendojo::menu::queue_toast(msg, true);
-        set_upload_status(msg, true);
+        set_upload_status("Set an author handle in Settings before uploading.", true);
         return;
     }
 
@@ -414,15 +485,15 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
         auto r = opendojo::cloud::api::submit_drill(args);
         g_upload.in_flight.store(false);
         if (!r.ok) {
-            std::string msg = r.error_message.empty() ? "upload failed" : r.error_message;
-            opendojo::menu::queue_toast(msg, true);
-            set_upload_status(std::move(msg), true);
+            set_upload_status(r.error_message.empty()
+                                  ? "Couldn't upload your drill. Please try again."
+                                  : r.error_message,
+                              true);
             return;
         }
-        const char* msg = r.deduped ? "Identical drill already on OpenDojo Cloud"
-                                    : "Uploaded to OpenDojo Cloud";
-        opendojo::menu::queue_toast(msg, false);
-        set_upload_status(msg, false);
+        set_upload_status(r.deduped ? "Identical drill already on OpenDojo Cloud"
+                                    : "Uploaded to OpenDojo Cloud",
+                          false);
     });
 }
 
@@ -450,107 +521,147 @@ void draw_cloud_tab() {
         kick_list();
     }
 
-    ImGui::TextDisabled("Search community drills");
-    ImGui::Spacing();
-
-    // ---- Row 1: search box + Search + Clear --------------------------------
-    ImGui::PushItemWidth(360);
-    bool submitted = ImGui::InputText("##search", g_browse.search_buf, sizeof(g_browse.search_buf),
-                                      ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    if (ImGui::Button("Search") || submitted) {
-        g_browse.offset = 0;
-        kick_list();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Clear")) {
-        g_browse.search_buf[0] = 0;
-        g_browse.character_combo_idx = kCharComboAll;
-        g_browse.difficulty_filter_idx = 0;
-        for (int i = 0; i < kCategoryCount; ++i)
-            g_browse.category_filter[i] = false;
-        g_browse.offset = 0;
-        kick_list();
-    }
-
-    // ---- Row 2: character / difficulty / sort -----------------------------
-    ImGui::Spacing();
-    ImGui::TextDisabled("Character:");
-    ImGui::SameLine();
+    // ---- Pill toggle: Browse / My uploads ----------------------------
+    // The pills swap the entire content area below: Browse shows the
+    // community filter row + community table; My uploads hides filters
+    // and renders just the caller's own drills with Edit/Delete row
+    // actions. Active pill is rendered in the accent color, inactive
+    // pill in the default frame color so the choice reads at a glance.
     {
-        std::string current_label;
-        int idx = g_browse.character_combo_idx;
-        if (idx <= kCharComboAll) {
-            current_label = "All characters";
-        } else {
-            int ri = idx - kCharComboRosterBase;
-            const auto& r = roster();
-            current_label = (ri >= 0 && ri < static_cast<int>(r.size())) ? r[ri] : "?";
-        }
-
-        const char* kAllLabel[] = {"All characters"};
-        ImGui::PushItemWidth(combo_item_width(roster(), kAllLabel, 1));
-        if (ImGui::BeginCombo("##character", current_label.c_str())) {
-            if (ImGui::Selectable("All characters", idx == kCharComboAll)) {
-                g_browse.character_combo_idx = kCharComboAll;
-                g_browse.offset = 0;
-                kick_list();
+        const ImVec4 active(0.78f, 0.18f, 0.22f, 1.0f);
+        const auto set_mode = [](Mode m) {
+            if (g_browse.mode == m) return;
+            g_browse.mode = m;
+            g_browse.offset = 0;
+            // Clear the cached result list so we don't briefly flash
+            // the wrong content while the new query is in flight.
+            {
+                std::lock_guard lk(g_browse.mtx);
+                g_browse.results.clear();
+                g_browse.error.clear();
             }
-            ImGui::Separator();
-            const auto& r = roster();
-            for (int i = 0; i < static_cast<int>(r.size()); ++i) {
-                int combo_idx = kCharComboRosterBase + i;
-                if (ImGui::Selectable(r[i].c_str(), idx == combo_idx)) {
-                    g_browse.character_combo_idx = combo_idx;
-                    g_browse.offset = 0;
-                    kick_list();
-                }
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::PopItemWidth();
+            kick_list();
+        };
+        const bool browsing = g_browse.mode == Mode::Browse;
+        if (browsing) ImGui::PushStyleColor(ImGuiCol_Button, active);
+        if (ImGui::Button("Browse")) set_mode(Mode::Browse);
+        opendojo::menu::nav_recenter();
+        if (browsing) ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (!browsing) ImGui::PushStyleColor(ImGuiCol_Button, active);
+        if (ImGui::Button("My uploads")) set_mode(Mode::MyUploads);
+        opendojo::menu::nav_recenter();
+        if (!browsing) ImGui::PopStyleColor();
     }
 
-    ImGui::SameLine();
-    ImGui::TextDisabled("|");
-    ImGui::SameLine();
-    ImGui::TextDisabled("Difficulty:");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(
-        combo_item_width(kDifficultyFilterLabels, IM_ARRAYSIZE(kDifficultyFilterLabels)));
-    if (ImGui::Combo("##diff_filter", &g_browse.difficulty_filter_idx, kDifficultyFilterLabels,
-                     IM_ARRAYSIZE(kDifficultyFilterLabels))) {
-        g_browse.offset = 0;
-        kick_list();
-    }
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    ImGui::TextDisabled("|");
-    ImGui::SameLine();
-    ImGui::TextDisabled("Sort:");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(combo_item_width(kSortLabels, IM_ARRAYSIZE(kSortLabels)));
-    if (ImGui::Combo("##sort", &g_browse.sort_idx, kSortLabels, IM_ARRAYSIZE(kSortLabels))) {
-        g_browse.offset = 0;
-        kick_list();
-    }
-    ImGui::PopItemWidth();
-
-    // ---- Row 3: tag chips. Checkbox renders close enough to a
-    // toggleable chip; one per category. Re-queries on change.
     ImGui::Spacing();
-    ImGui::TextDisabled("Tags:");
-    ImGui::SameLine();
-    for (int i = 0; i < kCategoryCount; ++i) {
-        ImGui::PushID(i);
-        if (ImGui::Checkbox(kCategories[i].label, &g_browse.category_filter[i])) {
+
+    if (g_browse.mode == Mode::MyUploads) {
+        ImGui::TextDisabled("Drills you've published to OpenDojo Cloud.");
+    } else {
+        ImGui::TextDisabled("Search community drills");
+        ImGui::Spacing();
+
+        // ---- Row 1: search box + Search + Clear ------------------------
+        ImGui::PushItemWidth(360);
+        bool submitted = ImGui::InputText("##search", g_browse.search_buf,
+                                          sizeof(g_browse.search_buf),
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGui::Button("Search") || submitted) {
             g_browse.offset = 0;
             kick_list();
         }
-        ImGui::PopID();
-        if (i + 1 < kCategoryCount) ImGui::SameLine();
-    }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            g_browse.search_buf[0] = 0;
+            g_browse.character_combo_idx = kCharComboAll;
+            g_browse.difficulty_filter_idx = 0;
+            for (int i = 0; i < kCategoryCount; ++i)
+                g_browse.category_filter[i] = false;
+            g_browse.offset = 0;
+            kick_list();
+        }
+
+        // ---- Row 2: character / difficulty / sort -----------------------------
+        ImGui::Spacing();
+        ImGui::TextDisabled("Character:");
+        ImGui::SameLine();
+        {
+            std::string current_label;
+            int idx = g_browse.character_combo_idx;
+            if (idx <= kCharComboAll) {
+                current_label = "All characters";
+            } else {
+                int ri = idx - kCharComboRosterBase;
+                const auto& r = roster();
+                current_label = (ri >= 0 && ri < static_cast<int>(r.size())) ? r[ri] : "?";
+            }
+
+            const char* kAllLabel[] = {"All characters"};
+            ImGui::PushItemWidth(combo_item_width(roster(), kAllLabel, 1));
+            if (ImGui::BeginCombo("##character", current_label.c_str())) {
+                if (ImGui::Selectable("All characters", idx == kCharComboAll)) {
+                    g_browse.character_combo_idx = kCharComboAll;
+                    g_browse.offset = 0;
+                    kick_list();
+                }
+                ImGui::Separator();
+                const auto& r = roster();
+                for (int i = 0; i < static_cast<int>(r.size()); ++i) {
+                    int combo_idx = kCharComboRosterBase + i;
+                    if (ImGui::Selectable(r[i].c_str(), idx == combo_idx)) {
+                        g_browse.character_combo_idx = combo_idx;
+                        g_browse.offset = 0;
+                        kick_list();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+        }
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        ImGui::TextDisabled("Difficulty:");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(
+            combo_item_width(kDifficultyFilterLabels, IM_ARRAYSIZE(kDifficultyFilterLabels)));
+        if (ImGui::Combo("##diff_filter", &g_browse.difficulty_filter_idx, kDifficultyFilterLabels,
+                         IM_ARRAYSIZE(kDifficultyFilterLabels))) {
+            g_browse.offset = 0;
+            kick_list();
+        }
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        ImGui::TextDisabled("Sort:");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(combo_item_width(kSortLabels, IM_ARRAYSIZE(kSortLabels)));
+        if (ImGui::Combo("##sort", &g_browse.sort_idx, kSortLabels, IM_ARRAYSIZE(kSortLabels))) {
+            g_browse.offset = 0;
+            kick_list();
+        }
+        ImGui::PopItemWidth();
+
+        // ---- Row 3: tag chips. Checkbox renders close enough to a
+        // toggleable chip; one per category. Re-queries on change.
+        ImGui::Spacing();
+        ImGui::TextDisabled("Tags:");
+        ImGui::SameLine();
+        for (int i = 0; i < kCategoryCount; ++i) {
+            ImGui::PushID(i);
+            if (ImGui::Checkbox(kCategories[i].label, &g_browse.category_filter[i])) {
+                g_browse.offset = 0;
+                kick_list();
+            }
+            ImGui::PopID();
+            if (i + 1 < kCategoryCount) ImGui::SameLine();
+        }
+    }  // end of Browse-mode filter row
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -577,7 +688,13 @@ void draw_cloud_tab() {
     }
 
     if (snapshot.empty() && !loading) {
-        ImGui::TextDisabled("No drills found. Try clearing filters or searching.");
+        if (g_browse.mode == Mode::MyUploads) {
+            ImGui::TextDisabled(
+                "You haven't uploaded any drills yet. Open the Export tab and use "
+                "\"Share to OpenDojo Cloud\" to publish your first.");
+        } else {
+            ImGui::TextDisabled("No drills found. Try clearing filters or searching.");
+        }
         return;
     }
 
@@ -591,16 +708,26 @@ void draw_cloud_tab() {
 
     const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
+    const bool my_uploads = g_browse.mode == Mode::MyUploads;
     if (ImGui::BeginTable("cloud_drills", 6, flags, ImVec2(0, 360))) {
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.8f);
         ImGui::TableSetupColumn("Character", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("Difficulty", ImGuiTableColumnFlags_WidthStretch, 0.9f);
         ImGui::TableSetupColumn("Stats", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         const auto pad = ImGui::GetStyle().FramePadding.x;
-        const float like_w = ImGui::CalcTextSize("Unlike").x + pad * 4;
-        const float dl_w = ImGui::CalcTextSize("Download").x + pad * 4;
-        ImGui::TableSetupColumn("Like", ImGuiTableColumnFlags_WidthFixed, like_w);
-        ImGui::TableSetupColumn("Download", ImGuiTableColumnFlags_WidthFixed, dl_w);
+        // Columns 4 + 5 swap roles based on mode. Browse = Like / Download
+        // (community actions). My uploads = Edit / Delete (owner actions).
+        if (my_uploads) {
+            const float edit_w = ImGui::CalcTextSize("Edit").x + pad * 4;
+            const float del_w = ImGui::CalcTextSize("Delete").x + pad * 4;
+            ImGui::TableSetupColumn("Edit", ImGuiTableColumnFlags_WidthFixed, edit_w);
+            ImGui::TableSetupColumn("Delete", ImGuiTableColumnFlags_WidthFixed, del_w);
+        } else {
+            const float like_w = ImGui::CalcTextSize("Unlike").x + pad * 4;
+            const float dl_w = ImGui::CalcTextSize("Download").x + pad * 4;
+            ImGui::TableSetupColumn("Like", ImGuiTableColumnFlags_WidthFixed, like_w);
+            ImGui::TableSetupColumn("Download", ImGuiTableColumnFlags_WidthFixed, dl_w);
+        }
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -609,49 +736,98 @@ void draw_cloud_tab() {
             ImGui::PushID(static_cast<int>(i));
             ImGui::TableNextRow();
 
-            // ---- Name cell: expand caret + name + meta + description ----
+            // ---- Name cell: expand toggle + name + meta + description ----
             ImGui::TableSetColumnIndex(0);
             const bool expanded = g_browse.expanded_ids.count(d.id) > 0;
             const bool has_desc = !d.description.empty();
-            // Reserve caret space even when there's nothing to expand,
-            // so the names align vertically across rows.
+            // Disclosure triangle: ImGui::ArrowButton, shrunk via
+            // FramePadding so it doesn't look like a transport button,
+            // and dimmed to ~half-opacity so it reads as a hint rather
+            // than a prominent action. Only rendered when there IS
+            // something to expand — an empty placeholder slot read as
+            // a missing-button glitch; we accept the slight horizontal
+            // jitter on names without descriptions for the cleaner look.
             if (has_desc) {
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1, 1));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.08f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.16f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 0.45f));
                 if (ImGui::ArrowButton("##exp", expanded ? ImGuiDir_Down : ImGuiDir_Right)) {
                     if (expanded)
                         g_browse.expanded_ids.erase(d.id);
                     else
                         g_browse.expanded_ids.insert(d.id);
                 }
-            } else {
-                // Phantom of the same size; keeps the indent.
-                float fs = ImGui::GetFrameHeight();
-                ImGui::Dummy(ImVec2(fs, fs));
+                ImGui::PopStyleColor(4);
+                ImGui::PopStyleVar();
+                ImGui::SameLine();
             }
-            ImGui::SameLine();
             ImGui::TextUnformatted(d.name.c_str());
 
-            // Meta line: "by author" / "Your upload" pill / #tags.
-            bool any_meta = false;
-            if (!d.author_handle.empty()) {
-                ImGui::TextDisabled("by %s", d.author_handle.c_str());
-                any_meta = true;
+            // Meta + description rendered in the small font — these are
+            // secondary information and shouldn't compete visually with
+            // the name or column headers. Falls back to the default
+            // font if the small one didn't load.
+            ImFont* small = opendojo::render_hook::small_font();
+            if (small) ImGui::PushFont(small);
+
+            // Meta line: "by author" / "Your upload" pill / #tags, wrapped
+            // across rows so a drill with many tags doesn't overflow or
+            // truncate. Each chunk decides whether to SameLine the next
+            // one based on remaining horizontal space (standard ImGui
+            // wrap pattern; same shape as the upload tag grid).
+            const float right_edge_x = ImGui::GetCursorScreenPos().x +
+                                       ImGui::GetContentRegionAvail().x;
+            const auto& style = ImGui::GetStyle();
+            const float space_w = ImGui::CalcTextSize(" ").x;
+
+            // emit_inline_chunk: render `text` (via fn) and decide whether
+            // the NEXT chunk's `next_w` fits on the same line.
+            auto fits = [&](float next_w) {
+                return ImGui::GetItemRectMax().x + style.ItemSpacing.x + next_w < right_edge_x;
+            };
+
+            bool first_meta = true;
+            // SameLine() before each chunk except the very first; we
+            // place every chunk via a fits() check on the previous item.
+            auto maybe_sameline = [&]() {
+                if (!first_meta) ImGui::SameLine();
+                first_meta = false;
+            };
+
+            std::string by_text;
+            if (!d.author_handle.empty()) by_text = std::string("by ") + d.author_handle;
+            if (!by_text.empty()) {
+                maybe_sameline();
+                ImGui::TextDisabled("%s", by_text.c_str());
             }
-            if (d.is_mine) {
-                if (any_meta) ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1), "[Your upload]");
-                any_meta = true;
-            }
+
+            // No "[Your upload]" tag here — that was Browse-mode chrome.
+            // Your own uploads live in the My uploads view now, where
+            // every row is yours so the tag would be redundant.
+
             for (std::size_t ci = 0; ci < d.categories.size(); ++ci) {
-                if (any_meta || ci > 0) ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1), "#%s",
-                                   category_label(d.categories[ci]));
-                any_meta = true;
+                std::string chip = std::string("#") + category_label(d.categories[ci]);
+                const float w = ImGui::CalcTextSize(chip.c_str()).x;
+                if (!first_meta && !fits(w)) {
+                    ImGui::NewLine();
+                    first_meta = true;
+                }
+                maybe_sameline();
+                ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1), "%s", chip.c_str());
             }
-            // Report affordance — shown on every row the user does NOT
-            // own. SmallButton fits inline; click opens the reason
-            // modal at the tab root.
-            if (!d.is_mine) {
-                if (any_meta) ImGui::SameLine();
+
+            // Report affordance — only in Browse mode, and only on
+            // rows the user does NOT own. My uploads view skips this
+            // because you can't report your own drills.
+            if (!my_uploads && !d.is_mine) {
+                const float w = ImGui::CalcTextSize("Report").x + style.FramePadding.x * 2.0f;
+                if (!first_meta && !fits(w + space_w)) {
+                    ImGui::NewLine();
+                    first_meta = true;
+                }
+                maybe_sameline();
                 if (ImGui::SmallButton("Report##rep")) {
                     g_browse.report_target_id = d.id;
                     g_browse.report_target_name = d.name;
@@ -688,6 +864,8 @@ void draw_cloud_tab() {
                 ImGui::PopStyleColor();
             }
 
+            if (small) ImGui::PopFont();
+
             // ---- Character ------------------------------------------
             ImGui::TableSetColumnIndex(1);
             if (!d.cpu_side.empty()) {
@@ -706,27 +884,59 @@ void draw_cloud_tab() {
             }
 
             // ---- Stats: recordings + counts ------------------------
+            // Each stat sits on its own line so the column doesn't get
+            // pushed out by a popular drill ("12345 saves / 67890 likes"
+            // would have overflowed the previous single-line layout).
+            // Large counts collapse to K / M to keep the column tight
+            // at high scale — "1.2K saves" rather than "1234 saves".
+            auto compact = [](long long n) -> std::string {
+                char buf[32];
+                if (n < 1000) {
+                    std::snprintf(buf, sizeof(buf), "%lld", n);
+                } else if (n < 1'000'000) {
+                    std::snprintf(buf, sizeof(buf), "%.1fK", n / 1000.0);
+                } else {
+                    std::snprintf(buf, sizeof(buf), "%.1fM", n / 1'000'000.0);
+                }
+                return buf;
+            };
             ImGui::TableSetColumnIndex(3);
             ImGui::Text("%d rec", d.recordings_count);
-            ImGui::TextDisabled("%lld dl / %lld likes", static_cast<long long>(d.downloads),
-                                static_cast<long long>(d.likes));
+            ImGui::TextDisabled("%s %s", compact(d.downloads).c_str(),
+                                d.downloads == 1 ? "save" : "saves");
+            ImGui::TextDisabled("%s %s", compact(d.likes).c_str(), d.likes == 1 ? "like" : "likes");
 
-            // ---- Like toggle ---------------------------------------
-            ImGui::TableSetColumnIndex(4);
-            const bool i_liked = liked_now.count(d.id) > 0;
-            if (ImGui::Button(i_liked ? "Unlike" : "Like", ImVec2(-1, 0))) {
-                kick_toggle_like(d.id);
-            }
-
-            // ---- Download (+ owner-only Delete stacked beneath) ----
-            ImGui::TableSetColumnIndex(5);
-            if (ImGui::Button("Download", ImVec2(-1, 0))) { kick_download(d.id, d.name); }
-            if (d.is_mine) {
+            // ---- Action columns ------------------------------------
+            // Browse mode: Like + Download.
+            // My uploads mode: Edit + Delete (owner-only actions).
+            // Delete here uses the same confirmation modal as before;
+            // Edit opens the edit modal pre-filled with this row's
+            // current name + description.
+            if (my_uploads) {
+                ImGui::TableSetColumnIndex(4);
+                if (ImGui::Button("Edit", ImVec2(-1, 0))) {
+                    g_browse.edit_target_id = d.id;
+                    g_browse.edit_target_original_name = d.name;
+                    std::snprintf(g_browse.edit_name_buf, sizeof(g_browse.edit_name_buf), "%s",
+                                  d.name.c_str());
+                    std::snprintf(g_browse.edit_desc_buf, sizeof(g_browse.edit_desc_buf), "%s",
+                                  d.description.c_str());
+                    g_browse.edit_modal_open_requested = true;
+                }
+                ImGui::TableSetColumnIndex(5);
                 if (destructive_button("Delete##rowdel", ImVec2(-1, 0))) {
                     g_browse.delete_target_id = d.id;
                     g_browse.delete_target_name = d.name;
                     g_browse.delete_modal_open_requested = true;
                 }
+            } else {
+                ImGui::TableSetColumnIndex(4);
+                const bool i_liked = liked_now.count(d.id) > 0;
+                if (ImGui::Button(i_liked ? "Unlike" : "Like", ImVec2(-1, 0))) {
+                    kick_toggle_like(d.id);
+                }
+                ImGui::TableSetColumnIndex(5);
+                if (ImGui::Button("Download", ImVec2(-1, 0))) { kick_download(d.id, d.name); }
             }
             ImGui::PopID();
         }
@@ -754,6 +964,46 @@ void draw_cloud_tab() {
             kick_delete_my_drill(g_browse.delete_target_id, g_browse.delete_target_name);
             ImGui::CloseCurrentPopup();
         }
+        ImGui::EndPopup();
+    }
+
+    // ---- Edit modal --------------------------------------------------
+    // Owner-only — opened from a row's Edit button in My uploads view.
+    // The buffers were pre-filled at click time; Save kicks the API.
+    if (g_browse.edit_modal_open_requested) {
+        g_browse.edit_modal_open_requested = false;
+        ImGui::OpenPopup("EditCloudDrill");
+    }
+    if (ImGui::BeginPopupModal("EditCloudDrill", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Edit drill");
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", g_browse.edit_target_original_name.c_str());
+        ImGui::Spacing();
+        ImGui::PushItemWidth(420);
+        ImGui::InputText("Name", g_browse.edit_name_buf, sizeof(g_browse.edit_name_buf));
+        ImGui::PopItemWidth();
+        ImGui::InputTextMultiline(
+            "Description", g_browse.edit_desc_buf, sizeof(g_browse.edit_desc_buf),
+            ImVec2(420, ImGui::GetTextLineHeight() * 5 + ImGui::GetStyle().FramePadding.y * 2));
+        ImGui::TextDisabled("Name 1-96 chars, description up to 1000.");
+        ImGui::Spacing();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        // Save is disabled until there's at least one non-whitespace
+        // character in the name — server would reject otherwise.
+        const bool name_has_content = [&] {
+            for (const char* p = g_browse.edit_name_buf; *p; ++p) {
+                if (*p != ' ' && *p != '\t') return true;
+            }
+            return false;
+        }();
+        if (!name_has_content) ImGui::BeginDisabled();
+        if (ImGui::Button("Save", ImVec2(120, 0))) {
+            kick_update_my_drill(g_browse.edit_target_id, g_browse.edit_name_buf,
+                                 g_browse.edit_desc_buf);
+            ImGui::CloseCurrentPopup();
+        }
+        if (!name_has_content) ImGui::EndDisabled();
         ImGui::EndPopup();
     }
 

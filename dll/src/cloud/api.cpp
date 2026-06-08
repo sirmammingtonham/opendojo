@@ -103,10 +103,16 @@ FailureInfo classify_http_failure(const opendojo::cloud::http::Response& res, co
         return f;
     }
 
-    // Upload path only: the Edge Function returns safe, user-facing copy in
-    // `error` (it logs DB details server-side and returns "internal error" for
-    // those), so we surface it. Read ONLY `error` — never `message`/`hint`.
-    if (trust_body) {
+    // Upload path: the Edge Function returns safe, user-facing copy in
+    // `error` for VALIDATION (400) and BAN (403) errors specifically —
+    // those messages are written for end users ("Name too long", "This
+    // account has been banned from uploading.", etc.). All other status
+    // codes (401 "invalid token", 405 "method not allowed", 413 "request
+    // body too large", 500 "internal error", …) carry internal-sounding
+    // strings we never want to render. Restrict trust_body to those two
+    // statuses so the server can keep adding diagnostic detail to its
+    // other branches without it leaking to the UI.
+    if (trust_body && (res.status == 400 || res.status == 403)) {
         auto j = json::parse(res.body, nullptr, false);
         if (j.is_object() && j.contains("error") && j["error"].is_string()) {
             f.message = j["error"].get<std::string>();
@@ -115,7 +121,7 @@ FailureInfo classify_http_failure(const opendojo::cloud::http::Response& res, co
     }
 
     if (res.status == 401 || res.status == 403) {
-        f.message = "Authorization failed. Try again in a moment.";
+        f.message = "Couldn't authenticate with OpenDojo Cloud. Try again in a moment.";
         return f;
     }
 
@@ -181,6 +187,11 @@ ListResult list_drills(const ListQuery& q) {
     if (!q.difficulty_filter.empty()) {
         url << "&difficulty=eq." << url_encode(q.difficulty_filter);
     }
+    if (q.mine_only) {
+        // drill_summaries computes is_mine via auth.uid() server-side, so
+        // filtering on it returns just the caller's uploads.
+        url << "&is_mine=eq.true";
+    }
     switch (q.sort) {
         case SortOrder::NewestFirst: url << "&order=created_at.desc,id.desc"; break;
         case SortOrder::MostDownloaded: url << "&order=downloads.desc,created_at.desc"; break;
@@ -198,7 +209,7 @@ ListResult list_drills(const ListQuery& q) {
 
     auto j = json::parse(res.body, nullptr, false);
     if (!j.is_array()) {
-        out.error_message = "list returned unexpected payload";
+        out.error_message = "Couldn't load drills. Please try again.";
         return out;
     }
     out.drills.reserve(j.size());
@@ -229,7 +240,7 @@ GetResult get_drill(const std::string& id) {
     auto j = json::parse(res.body, nullptr, false);
     // The function returns a table; PostgREST exposes that as an array.
     if (!j.is_array() || j.empty()) {
-        out.error_message = "drill not found";
+        out.error_message = "That drill isn't available anymore.";
         return out;
     }
     const auto& row = j[0];
@@ -239,7 +250,7 @@ GetResult get_drill(const std::string& id) {
     out.drill.content = row.value("content", "");
     out.drill.recordings_count = row.value("recordings_count", 0);
     if (out.drill.content.empty()) {
-        out.error_message = "drill has no content";
+        out.error_message = "Couldn't download that drill. Please try again.";
         return out;
     }
     out.ok = true;
@@ -276,13 +287,13 @@ SubmitResult submit_drill(const SubmitArgs& a) {
 
     auto j = json::parse(res.body, nullptr, false);
     if (!j.is_object()) {
-        out.error_message = "upload returned unexpected payload";
+        out.error_message = "Couldn't upload your drill. Please try again.";
         return out;
     }
     out.drill_id = j.value("id", "");
     out.deduped = j.value("deduped", false);
     out.ok = !out.drill_id.empty();
-    if (!out.ok) out.error_message = "upload returned no id";
+    if (!out.ok) out.error_message = "Couldn't upload your drill. Please try again.";
     return out;
 }
 
@@ -345,7 +356,42 @@ DeleteResult delete_my_drill(const std::string& drill_id) {
         out.deleted = j[0].get<bool>();
     }
     out.ok = true;
-    if (!out.deleted) { out.error_message = "drill not found or not yours"; }
+    if (!out.deleted) { out.error_message = "That drill isn't yours to delete."; }
+    return out;
+}
+
+UpdateResult update_my_drill(const std::string& drill_id, const std::string& name,
+                             const std::string& description) {
+    UpdateResult out;
+    if (!opendojo::cloud::auth::ensure_valid()) {
+        out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
+        return out;
+    }
+
+    auto url = opendojo::cloud::rest_url() + "/rpc/update_my_drill";
+    json body;
+    body["p_drill_id"] = drill_id;
+    body["p_name"] = name;
+    body["p_description"] = description;
+
+    auto res = opendojo::cloud::http::post(url, standard_headers(), body.dump());
+    if (auto fail = classify_http_failure(res, "save your changes"); fail.failed) {
+        out.error_message = std::move(fail.message);
+        return out;
+    }
+
+    // RPC returns a bare boolean — true if the row was found AND
+    // owned by caller AND lengths passed; false otherwise.
+    auto j = json::parse(res.body, nullptr, false);
+    if (j.is_boolean()) {
+        out.updated = j.get<bool>();
+    } else if (j.is_array() && !j.empty() && j[0].is_boolean()) {
+        out.updated = j[0].get<bool>();
+    }
+    out.ok = true;
+    if (!out.updated) {
+        out.error_message = "Couldn't save your changes. Check the name and try again.";
+    }
     return out;
 }
 

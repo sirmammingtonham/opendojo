@@ -37,6 +37,10 @@ struct ToastState {
     std::string text;
     bool is_error = false;
     clock::time_point until;
+    // Tab index the toast was raised on. The toast is hidden on every
+    // other tab — switching tabs clears the toast from view, since the
+    // action it confirms belonged to the originating tab.
+    int origin_tab = -1;
 };
 
 struct State {
@@ -109,6 +113,7 @@ void show_toast(std::string text, bool is_error = false) {
     g_state.toast.text = std::move(text);
     g_state.toast.is_error = is_error;
     g_state.toast.until = clock::now() + std::chrono::seconds(5);
+    g_state.toast.origin_tab = g_state.active_tab;
 }
 
 // Small destructive-action button. Same shape as Button but
@@ -816,6 +821,15 @@ void draw_about_tab() {
 void draw_toast() {
     if (g_state.toast.text.empty()) return;
     if (clock::now() > g_state.toast.until) {
+        g_state.toast.text.clear();
+        return;
+    }
+    // Toast is bound to the tab it was raised on. Switching tabs hides
+    // it — the action it confirmed belongs to the originating tab, and
+    // a stale "Downloaded: foo" lingering on the Settings tab would be
+    // confusing. We clear rather than just skip rendering so a switch
+    // back doesn't re-surface a stale toast.
+    if (g_state.toast.origin_tab != g_state.active_tab) {
         g_state.toast.text.clear();
         return;
     }

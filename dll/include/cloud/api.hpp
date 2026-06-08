@@ -52,7 +52,8 @@ struct ListQuery {
     std::string difficulty_filter;             // single id; empty = no filter
     SortOrder sort = SortOrder::NewestFirst;
     int offset = 0;
-    int limit = 50;  // server caps at 50 regardless
+    int limit = 50;          // server caps at 50 regardless
+    bool mine_only = false;  // restrict to drills the caller uploaded
 };
 
 ListResult list_drills(const ListQuery& q);
@@ -126,6 +127,21 @@ struct DeleteResult {
     std::string error_message;
 };
 DeleteResult delete_my_drill(const std::string& drill_id);
+
+// ---- Author edit ------------------------------------------------------------
+//
+// Updates name + description on one of the caller's own drills. Server
+// enforces ownership via the update_my_drill RPC; non-owners get
+// updated=false silently. Server also re-validates lengths (name 1..96,
+// description 0..1000) and returns updated=false on violation.
+
+struct UpdateResult {
+    bool ok = false;
+    bool updated = false;  // true only if the row was found AND owned by caller
+    std::string error_message;
+};
+UpdateResult update_my_drill(const std::string& drill_id, const std::string& name,
+                             const std::string& description);
 
 // ---- Report -----------------------------------------------------------------
 //

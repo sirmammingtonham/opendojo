@@ -283,8 +283,14 @@ bool init_imgui_resources(IDXGISwapChain3* swapchain) {
     return true;
 }
 
+// Secondary "small" font for metadata text (description snippets,
+// hashtag chips). Stashed at AddFont time and exposed via
+// opendojo::render_hook::small_font().
+ImFont* g_small_font = nullptr;
+
 // Load the menu font, rasterized at the target pixel size so it renders
-// crisp without runtime upscaling.
+// crisp without runtime upscaling. Also loads a secondary small font
+// (~78% of the primary size) for metadata text.
 //
 // Search order:
 //   1. Mods/OpenDojo/font/opendojo.ttf next to the game exe (user override)
@@ -312,6 +318,8 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
         0,
     };
 
+    const float small_px = pixel_size * 0.78f;
+
     auto try_path = [&](const std::filesystem::path& p, const char* label) -> bool {
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) return false;
@@ -325,11 +333,25 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
         return true;
     };
 
+    // After the primary font is registered (and optionally has symbols
+    // merged), add a second instance of the same TTF at ~78% size. We
+    // hold the returned pointer so the menu can PushFont() it for
+    // metadata-style text without disturbing the primary widget font.
+    auto load_small = [&](const std::filesystem::path& p) {
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec)) return;
+        auto utf8 = p.string();
+        if (auto* fnt = io.Fonts->AddFontFromFileTTF(utf8.c_str(), small_px, &cfg, kLatinRange)) {
+            g_small_font = fnt;
+            OPENDOJO_LOG("render_hook: loaded small font %s @ %.1fpx", utf8.c_str(), small_px);
+        }
+    };
+
     // Merge symbol glyphs from Segoe UI Symbol onto whatever primary
     // font we ended up with. Segoe UI Symbol ships with every modern
     // Windows install and contains the geometric shapes Segoe UI
     // itself doesn't include (★, ☆, ▲, etc).
-    auto merge_symbols = [&]() {
+    auto merge_symbols = [&](float px) {
         wchar_t windir[MAX_PATH];
         if (!GetWindowsDirectoryW(windir, MAX_PATH)) return;
         auto sym = std::filesystem::path(windir) / L"Fonts" / L"seguisym.ttf";
@@ -341,8 +363,8 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
         ImFontConfig merge = cfg;
         merge.MergeMode = true;
         auto utf8 = sym.string();
-        if (io.Fonts->AddFontFromFileTTF(utf8.c_str(), pixel_size, &merge, kSymbolRange)) {
-            OPENDOJO_LOG("render_hook: merged Segoe UI Symbol for symbol glyphs");
+        if (io.Fonts->AddFontFromFileTTF(utf8.c_str(), px, &merge, kSymbolRange)) {
+            OPENDOJO_LOG("render_hook: merged Segoe UI Symbol for symbol glyphs @ %.1fpx", px);
         }
     };
 
@@ -355,7 +377,8 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
                              .append(L"font")
                              .append(L"opendojo.ttf");
         if (try_path(user_font, "user-override")) {
-            merge_symbols();
+            merge_symbols(pixel_size);
+            load_small(user_font);
             return;
         }
     }
@@ -364,7 +387,8 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
     if (GetWindowsDirectoryW(windir, MAX_PATH)) {
         auto segoe = std::filesystem::path(windir) / L"Fonts" / L"segoeui.ttf";
         if (try_path(segoe, "Segoe UI")) {
-            merge_symbols();
+            merge_symbols(pixel_size);
+            load_small(segoe);
             return;
         }
     }
@@ -1061,6 +1085,10 @@ void toggle_menu() {
 
 bool menu_visible() {
     return g_menu_visible.load();
+}
+
+ImFont* small_font() {
+    return g_small_font;
 }
 
 }  // namespace opendojo::render_hook
