@@ -9,9 +9,12 @@
 --     paths exposed to `anon`/`authenticated` are the `drill_summaries`
 --     view (metadata only, no content) and the `get_drill` SECURITY
 --     DEFINER function (single-row read; bumps the lifetime download count).
---   * No client role ever writes to `drills`. The only write path is
---     the `submit_drill` Edge Function, which uses the service-role key
---     and validates in TypeScript before inserting.
+--   * No client role ever writes free-text content to `drills` directly.
+--     The only write paths for human-visible text are the `submit_drill`
+--     and `update_drill` Edge Functions, which use the service-role key and
+--     validate + profanity-screen in TypeScript before writing. The
+--     toggle_like / report_drill / delete_my_drill RPCs are owner-rights
+--     functions that touch only counters / status / the caller's own rows.
 --   * The database keeps no per-user rate-limit counters; `daily_stats`
 --     below is a metrics-only rollup, never read to gate a request.
 
@@ -426,51 +429,6 @@ end;
 $$;
 
 -- =============================================================
--- update_my_drill(uuid, text, text) — author-initiated edit of
--- name + description. Only updates if the caller is the uploader;
--- silently returns false otherwise (UI never shows the action to
--- non-owners). Server-side length / non-empty checks repeat the
--- column-level CHECK constraints so the client sees a clean
--- "false" return for invalid input rather than a Postgres
--- constraint error.
--- =============================================================
-
-create function update_my_drill(
-    p_drill_id    uuid,
-    p_name        text,
-    p_description text
-) returns boolean
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-    v_user_id uuid := auth.uid();
-    v_updated int;
-    v_name    text := nullif(btrim(coalesce(p_name, '')), '');
-    v_desc    text := coalesce(p_description, '');
-begin
-    if v_user_id is null then
-        raise exception 'authentication required' using errcode = '42501';
-    end if;
-    if v_name is null or char_length(v_name) > 96 then
-        return false;
-    end if;
-    if char_length(v_desc) > 1000 then
-        return false;
-    end if;
-
-    update drills
-       set name        = v_name,
-           description = v_desc
-     where id          = p_drill_id
-       and uploader_id = v_user_id;
-    get diagnostics v_updated = ROW_COUNT;
-    return v_updated > 0;
-end;
-$$;
-
--- =============================================================
 -- report_drill(uuid, text) — file a moderation complaint.
 -- One report per user per drill (composite PK). Auto-flips status to
 -- 'flagged' when the report counter crosses 10 — flagged drills disappear
@@ -573,8 +531,6 @@ grant  execute on function get_drill(uuid)
 grant  execute on function toggle_like(uuid)
                                   to   anon, authenticated;
 grant  execute on function delete_my_drill(uuid)
-                                  to   anon, authenticated;
-grant  execute on function update_my_drill(uuid, text, text)
                                   to   anon, authenticated;
 grant  execute on function report_drill(uuid, text)
                                   to   anon, authenticated;

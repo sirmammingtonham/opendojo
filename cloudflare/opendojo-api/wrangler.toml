@@ -2,92 +2,115 @@ name           = "opendojo-api"
 main           = "worker.ts"
 compatibility_date = "2026-01-01"
 
-[[unsafe.bindings]]
-name      = "RL_SIGNUP"
-type      = "ratelimit"
+# Observability (Workers Logs). `observability` is an inheritable key, so the
+# [env.staging] worker picks this up too without duplication. Already enabled
+# in the dashboard; defining it here makes wrangler the source of truth on deploy.
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+
+# Per-IP rate-limit buckets, sized to typical human cadence over a 60s window
+# (the Workers rate-limit binding only supports a 10s or 60s window, not hourly).
+# These are burst guards, not hourly quotas. namespace_id is just a unique-per-
+# account integer with no separate provisioning step — it activates on deploy.
+#
+# Uses the GA `[[ratelimits]]` binding (not the old experimental
+# `[[unsafe.bindings]]` form), so wrangler validates limit/period at build time.
+#
+# Sizing notes:
+#   * GENERAL = the drill_summaries list query only. Category/difficulty lookups
+#     are client-side constants (not fetched), so a Browse open / filter / page
+#     is 1 request each — no fan-out. 20/min covers heavy browsing + the list
+#     refresh that fires after each download.
+#   * SIGNUP / token-refresh are also capped by Supabase's own [auth.rate_limit]
+#     (anon signups 5/hr per IP), so these worker buckets only stop bursts.
+
+[[ratelimits]]
+name = "RL_SIGNUP"
 namespace_id = "1001"
-simple = { limit = 5, period = 3600 }
+simple = { limit = 5, period = 60 }
 
-[[unsafe.bindings]]
-name      = "RL_SUBMIT"
-type      = "ratelimit"
+[[ratelimits]]
+name = "RL_SUBMIT"
 namespace_id = "1002"
-simple = { limit = 20, period = 3600 }
+simple = { limit = 5, period = 60 }
 
-[[unsafe.bindings]]
-name      = "RL_DOWNLOAD"
-type      = "ratelimit"
+[[ratelimits]]
+name = "RL_UPDATE"
+namespace_id = "1008"
+simple = { limit = 5, period = 60 }
+
+[[ratelimits]]
+name = "RL_DOWNLOAD"
 namespace_id = "1003"
-simple = { limit = 50, period = 3600 }
+simple = { limit = 10, period = 60 }
 
-[[unsafe.bindings]]
-name      = "RL_REPORT"
-type      = "ratelimit"
+[[ratelimits]]
+name = "RL_REPORT"
 namespace_id = "1004"
-simple = { limit = 20, period = 3600 }
+simple = { limit = 3, period = 60 }
 
-[[unsafe.bindings]]
-name      = "RL_LIKE"
-type      = "ratelimit"
+[[ratelimits]]
+name = "RL_LIKE"
 namespace_id = "1005"
-simple = { limit = 50, period = 3600 }
+simple = { limit = 10, period = 60 }
 
-[[unsafe.bindings]]
-name      = "RL_AUTH_OTHER"
-type      = "ratelimit"
+[[ratelimits]]
+name = "RL_AUTH_OTHER"
 namespace_id = "1006"
-simple = { limit = 240, period = 3600 }
+simple = { limit = 5, period = 60 }
 
-[[unsafe.bindings]]
-name      = "RL_GENERAL"
-type      = "ratelimit"
+[[ratelimits]]
+name = "RL_GENERAL"
 namespace_id = "1007"
-simple = { limit = 240, period = 3600 }
+simple = { limit = 20, period = 60 }
 
 # Staging — `wrangler deploy --env staging`. Separate script + workers.dev URL,
 # its own secrets (set with `--env staging`), and distinct rate-limit
-# namespace_ids so it doesn't share prod's buckets.
+# namespace_ids so it doesn't share prod's buckets. Defined explicitly here
+# (not inherited) to keep the staging namespace_ids isolated from prod's.
 [env.staging]
 name = "opendojo-api-staging"
 
-[[env.staging.unsafe.bindings]]
-name      = "RL_SIGNUP"
-type      = "ratelimit"
+[[env.staging.ratelimits]]
+name = "RL_SIGNUP"
 namespace_id = "2001"
-simple = { limit = 5, period = 3600 }
+simple = { limit = 5, period = 60 }
 
-[[env.staging.unsafe.bindings]]
-name      = "RL_SUBMIT"
-type      = "ratelimit"
+[[env.staging.ratelimits]]
+name = "RL_SUBMIT"
 namespace_id = "2002"
-simple = { limit = 20, period = 3600 }
+simple = { limit = 5, period = 60 }
 
-[[env.staging.unsafe.bindings]]
-name      = "RL_DOWNLOAD"
-type      = "ratelimit"
+[[env.staging.ratelimits]]
+name = "RL_UPDATE"
+namespace_id = "2008"
+simple = { limit = 5, period = 60 }
+
+[[env.staging.ratelimits]]
+name = "RL_DOWNLOAD"
 namespace_id = "2003"
-simple = { limit = 50, period = 3600 }
+simple = { limit = 10, period = 60 }
 
-[[env.staging.unsafe.bindings]]
-name      = "RL_REPORT"
-type      = "ratelimit"
+[[env.staging.ratelimits]]
+name = "RL_REPORT"
 namespace_id = "2004"
-simple = { limit = 20, period = 3600 }
+simple = { limit = 3, period = 60 }
 
-[[env.staging.unsafe.bindings]]
-name      = "RL_LIKE"
-type      = "ratelimit"
+[[env.staging.ratelimits]]
+name = "RL_LIKE"
 namespace_id = "2005"
-simple = { limit = 50, period = 3600 }
+simple = { limit = 10, period = 60 }
 
-[[env.staging.unsafe.bindings]]
-name      = "RL_AUTH_OTHER"
-type      = "ratelimit"
+[[env.staging.ratelimits]]
+name = "RL_AUTH_OTHER"
 namespace_id = "2006"
-simple = { limit = 240, period = 3600 }
+simple = { limit = 5, period = 60 }
 
-[[env.staging.unsafe.bindings]]
-name      = "RL_GENERAL"
-type      = "ratelimit"
+[[env.staging.ratelimits]]
+name = "RL_GENERAL"
 namespace_id = "2007"
-simple = { limit = 240, period = 3600 }
+simple = { limit = 20, period = 60 }

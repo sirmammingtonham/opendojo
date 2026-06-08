@@ -40,5 +40,10 @@ token_refresh      = 150
 # via getUser).
 verify_jwt = false
 
+[functions.update_drill]
+# Same as submit_drill: publishable keys aren't JWTs, so gateway JWT
+# verification can't run. The function validates the caller's token itself.
+verify_jwt = false
+
 [db]
 major_version = 17

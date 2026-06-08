@@ -368,29 +368,32 @@ UpdateResult update_my_drill(const std::string& drill_id, const std::string& nam
         return out;
     }
 
-    auto url = opendojo::cloud::rest_url() + "/rpc/update_my_drill";
+    // Edits go through the update_drill Edge Function (not a direct RPC) so
+    // they get the same server-side validation + profanity screen as uploads.
+    auto url = opendojo::cloud::functions_url() + "/update_drill";
     json body;
-    body["p_drill_id"] = drill_id;
-    body["p_name"] = name;
-    body["p_description"] = description;
+    body["id"] = drill_id;
+    body["name"] = name;
+    body["description"] = description;
 
+    // trust_body: the Edge Function returns safe, user-facing copy in `error`
+    // (validation / profanity / ban), same contract as submit_drill.
     auto res = opendojo::cloud::http::post(url, standard_headers(), body.dump());
-    if (auto fail = classify_http_failure(res, "save your changes"); fail.failed) {
+    if (auto fail = classify_http_failure(res, "save your changes", /*trust_body=*/true);
+        fail.failed) {
         out.error_message = std::move(fail.message);
         return out;
     }
 
-    // RPC returns a bare boolean — true if the row was found AND
-    // owned by caller AND lengths passed; false otherwise.
+    // Success body is { "updated": bool } — true if the row was found AND
+    // owned by the caller. A non-owner / missing id returns updated=false.
     auto j = json::parse(res.body, nullptr, false);
-    if (j.is_boolean()) {
-        out.updated = j.get<bool>();
-    } else if (j.is_array() && !j.empty() && j[0].is_boolean()) {
-        out.updated = j[0].get<bool>();
+    if (j.is_object()) {
+        out.updated = j.value("updated", false);
     }
     out.ok = true;
-    if (!out.updated) {
-        out.error_message = "Couldn't save your changes. Check the name and try again.";
+    if (!out.updated && out.error_message.empty()) {
+        out.error_message = "Couldn't save your changes. Please try again.";
     }
     return out;
 }

@@ -6,6 +6,7 @@ export interface Env {
     PROXY_KEY:                string;
     RL_SIGNUP:      RateLimit;
     RL_SUBMIT:      RateLimit;
+    RL_UPDATE:      RateLimit;
     RL_DOWNLOAD:    RateLimit;
     RL_REPORT:      RateLimit;
     RL_LIKE:        RateLimit;
@@ -25,6 +26,7 @@ function deny(status: number, msg: string, extra?: HeadersInit): Response {
 function bindingFor(path: string, env: Env): RateLimit | null {
     if (path.startsWith("/auth/v1/signup"))             return env.RL_SIGNUP;
     if (path.startsWith("/functions/v1/submit_drill"))  return env.RL_SUBMIT;
+    if (path.startsWith("/functions/v1/update_drill"))  return env.RL_UPDATE;
     if (path.startsWith("/rest/v1/rpc/get_drill"))      return env.RL_DOWNLOAD;
     if (path.startsWith("/rest/v1/rpc/report_drill"))   return env.RL_REPORT;
     if (path.startsWith("/rest/v1/rpc/toggle_like"))    return env.RL_LIKE;
