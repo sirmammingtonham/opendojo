@@ -82,3 +82,20 @@ Deno.test("rejects zero-width chars in description", () => {
         "forbidden",
     );
 });
+
+Deno.test("categories: empty by default", () => {
+    assertEquals(ok({ id: ID, name: "n" }).categories, []);
+    assertEquals(ok({ id: ID, name: "n", categories: null }).categories, []);
+});
+
+Deno.test("categories: dedupes and rejects unknown ids", () => {
+    const e = ok({ id: ID, name: "n", categories: ["reaction", "reaction", "punishment"] });
+    assertEquals(e.categories.sort(), ["punishment", "reaction"]);
+    assertStringIncludes(err({ id: ID, name: "n", categories: ["nope"] }), "unknown category");
+});
+
+Deno.test("difficulty: null by default, accepts canonical ids", () => {
+    assertEquals(ok({ id: ID, name: "n" }).difficulty, null);
+    assertEquals(ok({ id: ID, name: "n", difficulty: "advanced" }).difficulty, "advanced");
+    assertStringIncludes(err({ id: ID, name: "n", difficulty: "easy" }), "unknown difficulty");
+});

@@ -166,13 +166,15 @@ struct BrowseState {
     char report_reason_buf[256] = "";
     bool report_modal_open_requested = false;
 
-    // Pending edit target (My uploads). Pre-fill name + description
-    // buffers when the user clicks Edit on a row; the modal reads
-    // these and writes back on Save. ImGui owns the buffer memory.
+    // Pending edit target (My uploads). Pre-fill all metadata buffers
+    // when the user clicks Edit on a row; the modal reads these and
+    // writes back on Save. ImGui owns the text-buffer memory.
     std::string edit_target_id;
     std::string edit_target_original_name;
     char edit_name_buf[96] = "";
     char edit_desc_buf[1024] = "";
+    bool edit_cat_picks[kCategoryCount] = {false, false, false, false, false};
+    int edit_difficulty_idx = 0;  // matches kUploadDifficultyLabels — 0 = (none)
     bool edit_modal_open_requested = false;
 };
 
@@ -380,10 +382,9 @@ void kick_delete_my_drill(const std::string& drill_id, const std::string& displa
     });
 }
 
-void kick_update_my_drill(const std::string& drill_id, const std::string& name,
-                          const std::string& description) {
-    opendojo::cloud::worker::submit([drill_id, name, description]() {
-        auto r = opendojo::cloud::api::update_my_drill(drill_id, name, description);
+void kick_update_drill(opendojo::cloud::api::UpdateArgs args) {
+    opendojo::cloud::worker::submit([args = std::move(args)]() {
+        auto r = opendojo::cloud::api::update_drill(args);
         if (!r.ok || !r.updated) {
             opendojo::menu::queue_toast(r.error_message.empty()
                                             ? "Couldn't save your changes. Please try again."
@@ -391,14 +392,16 @@ void kick_update_my_drill(const std::string& drill_id, const std::string& name,
                                         true);
             return;
         }
-        // Patch local cache so the row reflects the new name/desc
+        // Patch local cache so the row reflects the new metadata
         // instantly without waiting on a list refetch.
         {
             std::lock_guard lk(g_browse.mtx);
             for (auto& d : g_browse.results) {
-                if (d.id == drill_id) {
-                    d.name = name;
-                    d.description = description;
+                if (d.id == args.drill_id) {
+                    d.name = args.name;
+                    d.description = args.description;
+                    d.categories = args.categories;
+                    d.difficulty = args.difficulty;
                     break;
                 }
             }
@@ -740,14 +743,18 @@ void draw_cloud_tab() {
             ImGui::TableSetColumnIndex(0);
             const bool expanded = g_browse.expanded_ids.count(d.id) > 0;
             const bool has_desc = !d.description.empty();
+            // The collapsed view truncates descriptions longer than this
+            // many chars with "…". Anything shorter renders identically
+            // collapsed vs expanded, so the toggle would be a no-op and
+            // is suppressed.
+            constexpr std::size_t kSnippetLimit = 160;
+            const bool can_expand = has_desc && d.description.size() > kSnippetLimit;
             // Disclosure triangle: ImGui::ArrowButton, shrunk via
             // FramePadding so it doesn't look like a transport button,
             // and dimmed to ~half-opacity so it reads as a hint rather
-            // than a prominent action. Only rendered when there IS
-            // something to expand — an empty placeholder slot read as
-            // a missing-button glitch; we accept the slight horizontal
-            // jitter on names without descriptions for the cleaner look.
-            if (has_desc) {
+            // than a prominent action. Only rendered when expanding
+            // would actually reveal more text.
+            if (can_expand) {
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1, 1));
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.08f));
@@ -850,7 +857,6 @@ void draw_cloud_tab() {
                     // Snippet: clip to ~160 chars + ellipsis. Avoids
                     // pulling in a wrap-then-clip helper for what's
                     // a one-line policy.
-                    constexpr std::size_t kSnippetLimit = 160;
                     if (d.description.size() <= kSnippetLimit) {
                         ImGui::TextWrapped("%s", d.description.c_str());
                     } else {
@@ -901,10 +907,16 @@ void draw_cloud_tab() {
                 return buf;
             };
             ImGui::TableSetColumnIndex(3);
+            // Stats are tertiary information — render in the small font
+            // so they don't dominate the column. Single push wraps all
+            // three lines for one PushFont/PopFont pair.
+            ImFont* stats_font = opendojo::render_hook::small_font();
+            if (stats_font) ImGui::PushFont(stats_font);
             ImGui::Text("%d rec", d.recordings_count);
             ImGui::TextDisabled("%s %s", compact(d.downloads).c_str(),
                                 d.downloads == 1 ? "save" : "saves");
             ImGui::TextDisabled("%s %s", compact(d.likes).c_str(), d.likes == 1 ? "like" : "likes");
+            if (stats_font) ImGui::PopFont();
 
             // ---- Action columns ------------------------------------
             // Browse mode: Like + Download.
@@ -921,6 +933,25 @@ void draw_cloud_tab() {
                                   d.name.c_str());
                     std::snprintf(g_browse.edit_desc_buf, sizeof(g_browse.edit_desc_buf), "%s",
                                   d.description.c_str());
+                    // Seed tag pickers from current categories.
+                    for (int ci = 0; ci < kCategoryCount; ++ci) {
+                        g_browse.edit_cat_picks[ci] = false;
+                        for (const auto& tag : d.categories) {
+                            if (tag == kCategories[ci].id) {
+                                g_browse.edit_cat_picks[ci] = true;
+                                break;
+                            }
+                        }
+                    }
+                    // Seed difficulty combo from the current value;
+                    // index 0 = (none).
+                    g_browse.edit_difficulty_idx = 0;
+                    for (int di = 0; di < kDifficultyCount; ++di) {
+                        if (d.difficulty == kDifficulties[di].id) {
+                            g_browse.edit_difficulty_idx = di + 1;
+                            break;
+                        }
+                    }
                     g_browse.edit_modal_open_requested = true;
                 }
                 ImGui::TableSetColumnIndex(5);
@@ -974,18 +1005,56 @@ void draw_cloud_tab() {
         g_browse.edit_modal_open_requested = false;
         ImGui::OpenPopup("EditCloudDrill");
     }
-    if (ImGui::BeginPopupModal("EditCloudDrill", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    // SetNextWindowSize must be called immediately before the matching
+    // Begin* call — issuing it on the OpenPopup frame doesn't carry
+    // over to the BeginPopupModal frame, which is why the previous
+    // attempt left the modal at its auto-sized (skinny) default.
+    // Width also bumped to give Description real room; ImGui's
+    // InputTextMultiline does not word-wrap, so a wider box is the
+    // only way to keep typical descriptions visible in one line.
+    ImGui::SetNextWindowSize(ImVec2(760, 0), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("EditCloudDrill", nullptr, 0)) {
         ImGui::Text("Edit drill");
         ImGui::Spacing();
         ImGui::TextDisabled("%s", g_browse.edit_target_original_name.c_str());
         ImGui::Spacing();
-        ImGui::PushItemWidth(420);
-        ImGui::InputText("Name", g_browse.edit_name_buf, sizeof(g_browse.edit_name_buf));
+        // Inputs stretch to the modal width so long lines have the
+        // most horizontal room before scrolling.
+        ImGui::PushItemWidth(-FLT_MIN);
+        ImGui::InputText("##editname", g_browse.edit_name_buf, sizeof(g_browse.edit_name_buf));
         ImGui::PopItemWidth();
-        ImGui::InputTextMultiline(
-            "Description", g_browse.edit_desc_buf, sizeof(g_browse.edit_desc_buf),
-            ImVec2(420, ImGui::GetTextLineHeight() * 5 + ImGui::GetStyle().FramePadding.y * 2));
-        ImGui::TextDisabled("Name 1-96 chars, description up to 1000.");
+        ImGui::TextDisabled("Name (1-96 chars)");
+
+        ImGui::Spacing();
+        ImGui::InputTextMultiline("##editdesc", g_browse.edit_desc_buf,
+                                  sizeof(g_browse.edit_desc_buf),
+                                  ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 5 +
+                                                       ImGui::GetStyle().FramePadding.y * 2));
+        ImGui::TextDisabled(
+            "Description (optional, up to 1000 chars — press Enter for paragraph breaks)");
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Tags (optional)");
+        if (ImGui::BeginTable("editTags", 2,
+                              ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoPadOuterX)) {
+            for (int i = 0; i < kCategoryCount; ++i) {
+                ImGui::TableNextColumn();
+                ImGui::PushID(i);
+                ImGui::Checkbox(kCategories[i].label, &g_browse.edit_cat_picks[i]);
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Difficulty (optional)");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(
+            combo_item_width(kUploadDifficultyLabels, IM_ARRAYSIZE(kUploadDifficultyLabels)));
+        ImGui::Combo("##editdiff", &g_browse.edit_difficulty_idx, kUploadDifficultyLabels,
+                     IM_ARRAYSIZE(kUploadDifficultyLabels));
+        ImGui::PopItemWidth();
+
         ImGui::Spacing();
         if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
@@ -999,8 +1068,18 @@ void draw_cloud_tab() {
         }();
         if (!name_has_content) ImGui::BeginDisabled();
         if (ImGui::Button("Save", ImVec2(120, 0))) {
-            kick_update_my_drill(g_browse.edit_target_id, g_browse.edit_name_buf,
-                                 g_browse.edit_desc_buf);
+            opendojo::cloud::api::UpdateArgs args;
+            args.drill_id = g_browse.edit_target_id;
+            args.name = g_browse.edit_name_buf;
+            args.description = g_browse.edit_desc_buf;
+            for (int i = 0; i < kCategoryCount; ++i) {
+                if (g_browse.edit_cat_picks[i]) args.categories.emplace_back(kCategories[i].id);
+            }
+            if (g_browse.edit_difficulty_idx > 0 &&
+                g_browse.edit_difficulty_idx <= kDifficultyCount) {
+                args.difficulty = kDifficulties[g_browse.edit_difficulty_idx - 1].id;
+            }
+            kick_update_drill(std::move(args));
             ImGui::CloseCurrentPopup();
         }
         if (!name_has_content) ImGui::EndDisabled();

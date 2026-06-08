@@ -130,20 +130,28 @@ DeleteResult delete_my_drill(const std::string& drill_id);
 
 // ---- Author edit ------------------------------------------------------------
 //
-// Updates name + description on one of the caller's own drills via the
-// update_drill Edge Function, which re-validates lengths (name 1..96,
-// description 0..1000), screens the same profanity as uploads, and enforces
-// ownership server-side (uploader_id must match the caller). Non-owners get
-// updated=false silently. Validation / profanity failures surface a clean
-// server message in error_message.
+// Updates name / description / categories / difficulty on one of the
+// caller's own drills via the update_drill Edge Function, which re-validates
+// lengths (name 1..96, description 0..1000), checks taxonomy ids against
+// the same allow-list as submit_drill, screens the same profanity as
+// uploads, and enforces ownership server-side (uploader_id must match the
+// caller). Non-owners get updated=false silently. Validation / profanity
+// failures surface a clean server message in error_message.
+
+struct UpdateArgs {
+    std::string drill_id;
+    std::string name;
+    std::string description;              // may be empty (clears the field)
+    std::vector<std::string> categories;  // canonical ids; empty clears tags
+    std::string difficulty;               // canonical id or "" to clear
+};
 
 struct UpdateResult {
     bool ok = false;
     bool updated = false;  // true only if the row was found AND owned by caller
     std::string error_message;
 };
-UpdateResult update_my_drill(const std::string& drill_id, const std::string& name,
-                             const std::string& description);
+UpdateResult update_drill(const UpdateArgs& args);
 
 // ---- Report -----------------------------------------------------------------
 //

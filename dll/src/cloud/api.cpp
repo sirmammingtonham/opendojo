@@ -360,8 +360,7 @@ DeleteResult delete_my_drill(const std::string& drill_id) {
     return out;
 }
 
-UpdateResult update_my_drill(const std::string& drill_id, const std::string& name,
-                             const std::string& description) {
+UpdateResult update_drill(const UpdateArgs& args) {
     UpdateResult out;
     if (!opendojo::cloud::auth::ensure_valid()) {
         out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
@@ -372,9 +371,11 @@ UpdateResult update_my_drill(const std::string& drill_id, const std::string& nam
     // they get the same server-side validation + profanity screen as uploads.
     auto url = opendojo::cloud::functions_url() + "/update_drill";
     json body;
-    body["id"] = drill_id;
-    body["name"] = name;
-    body["description"] = description;
+    body["id"] = args.drill_id;
+    body["name"] = args.name;
+    body["description"] = args.description;
+    body["categories"] = args.categories;  // empty array clears all tags
+    if (!args.difficulty.empty()) body["difficulty"] = args.difficulty;
 
     // trust_body: the Edge Function returns safe, user-facing copy in `error`
     // (validation / profanity / ban), same contract as submit_drill.
@@ -388,9 +389,7 @@ UpdateResult update_my_drill(const std::string& drill_id, const std::string& nam
     // Success body is { "updated": bool } — true if the row was found AND
     // owned by the caller. A non-owner / missing id returns updated=false.
     auto j = json::parse(res.body, nullptr, false);
-    if (j.is_object()) {
-        out.updated = j.value("updated", false);
-    }
+    if (j.is_object()) { out.updated = j.value("updated", false); }
     out.ok = true;
     if (!out.updated && out.error_message.empty()) {
         out.error_message = "Couldn't save your changes. Please try again.";

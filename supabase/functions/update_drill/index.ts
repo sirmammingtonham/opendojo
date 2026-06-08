@@ -1,11 +1,12 @@
-// update_drill - author edit of an existing drill's name + description.
+// update_drill - author edit of an existing drill's metadata.
 //
 // This is the SECOND privileged write path into `drills` (alongside
 // submit_drill) and exists so edits get the SAME server-side validation +
-// profanity screen as uploads. It deliberately touches ONLY name and
-// description - never content, content_hash, author_handle, status, or any
-// counter - so an edit can't re-hash content, un-hide a flagged drill,
-// launder reports, or reassign ownership.
+// profanity screen as uploads. It deliberately touches ONLY the four
+// human-curated metadata fields - name, description, categories, difficulty
+// - never content, content_hash, author_handle, status, or any counter -
+// so an edit can't re-hash content, un-hide a flagged drill, launder
+// reports, or reassign ownership.
 //
 // Lifecycle:
 //   1. Verify the caller's token via getUser(). config.toml sets
@@ -109,7 +110,12 @@ Deno.serve(async (req) => {
     // so it re-indexes automatically.
     const { data: rows, error: updErr } = await admin
         .from("drills")
-        .update({ name: edit.name, description: edit.description })
+        .update({
+            name:        edit.name,
+            description: edit.description,
+            categories:  edit.categories,
+            difficulty:  edit.difficulty,
+        })
         .eq("id", edit.id)
         .eq("uploader_id", userId)
         .select("id");

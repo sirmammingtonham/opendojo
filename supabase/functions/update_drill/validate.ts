@@ -1,24 +1,36 @@
 // Pure validation for update_drill - split from index.ts so it can be
 // unit-tested without Deno.serve / a Supabase client. Mirrors the name +
-// description rules in submit_drill's validate(), reusing the SAME character
-// classifier + line-ending normalizer so the two write paths can't drift.
+// description + taxonomy rules in submit_drill's validate(), reusing the
+// SAME character classifier + line-ending normalizer + ALLOWED_* sets so
+// the two write paths can't drift.
 
-import { hasForbiddenChar, normalizeLineEndings } from "../submit_drill/validate.ts";
+import {
+    ALLOWED_CATEGORIES,
+    ALLOWED_DIFFICULTIES,
+    hasForbiddenChar,
+    MAX_CATEGORIES,
+    normalizeLineEndings,
+} from "../submit_drill/validate.ts";
 
-// Edits are tiny (a name + a short description). Cap the body well below the
-// upload cap so a junk payload is rejected before we read it.
+// Edits are tiny (a name + a short description + a handful of taxonomy
+// strings). Cap the body well below the upload cap so a junk payload is
+// rejected before we read it.
 export const MAX_EDIT_BODY_BYTES = 8 * 1024;
 
 export interface EditBody {
     id?: unknown;
     name?: unknown;
     description?: unknown;
+    categories?: unknown;
+    difficulty?: unknown;
 }
 
 export type ValidatedEdit = {
     id: string;
     name: string;
     description: string;
+    categories: string[];
+    difficulty: string | null;
 };
 
 const RE_UUID =
@@ -48,5 +60,37 @@ export function validateEdit(body: EditBody): { ok: ValidatedEdit } | { err: str
         if (hasForbiddenChar(description, true))  return { err: "description contains forbidden characters" };
     }
 
-    return { ok: { id: body.id, name, description } };
+    // categories: optional. Absent/null -> [] (clears tags). Same allow-list
+    // and dedupe as submit_drill — unknown ids are rejected outright rather
+    // than dropped, so taxonomy drift surfaces instead of being swallowed.
+    let categories: string[] = [];
+    if (body.categories != null) {
+        if (!Array.isArray(body.categories)) {
+            return { err: "categories must be an array of strings" };
+        }
+        if (body.categories.length > MAX_CATEGORIES) {
+            return { err: `at most ${MAX_CATEGORIES} categories` };
+        }
+        const seen = new Set<string>();
+        for (const c of body.categories) {
+            if (typeof c !== "string" || !ALLOWED_CATEGORIES.has(c)) {
+                return { err: `unknown category: ${String(c)}` };
+            }
+            seen.add(c);
+        }
+        categories = [...seen];
+    }
+
+    // difficulty: optional. Absent/null -> null (clears it). Must be one of
+    // the canonical ids when present.
+    let difficulty: string | null = null;
+    if (body.difficulty != null) {
+        if (typeof body.difficulty !== "string" ||
+            !ALLOWED_DIFFICULTIES.has(body.difficulty)) {
+            return { err: `unknown difficulty: ${String(body.difficulty)}` };
+        }
+        difficulty = body.difficulty;
+    }
+
+    return { ok: { id: body.id, name, description, categories, difficulty } };
 }
