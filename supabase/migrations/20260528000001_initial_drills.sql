@@ -473,8 +473,9 @@ $$;
 -- =============================================================
 -- RLS — deny everything to anon/authenticated on `drills`. They
 -- get to the data only through `drill_summaries` (filtered view)
--- and `get_drill` (SECURITY DEFINER). The Edge Function bypasses
--- RLS by virtue of using the secret key.
+-- and `get_drill` (SECURITY DEFINER). The Edge Function uses the secret
+-- key (service_role), which bypasses RLS — but RLS bypass still requires
+-- a table GRANT, added explicitly in the grants section below.
 -- =============================================================
 
 alter table drills        enable row level security;
@@ -488,6 +489,23 @@ alter table likes         enable row level security;
 revoke all on drills              from anon, authenticated;
 revoke all on likes               from anon, authenticated;
 revoke all on drill_summaries     from anon, authenticated;
+
+-- service_role grants. RLS bypass and table GRANTs are INDEPENDENT checks,
+-- and service_role only skips the first one:
+--   * GRANT = may the role touch this table at all?  (checked first)
+--   * RLS   = which rows may it see?                  (service_role skips)
+-- Without an explicit GRANT, Postgres raises "permission denied" BEFORE RLS
+-- is ever considered — so "service_role bypasses RLS" is not enough on its
+-- own. The Edge Function (ban check + dedupe/upsert) and the admin panel
+-- (ban/unban, moderation status + hard delete, report queue) reach these
+-- tables with the secret key, so service_role needs the privileges below.
+-- This grants nothing to anon/authenticated — public exposure is unchanged.
+grant select, insert, delete         on user_bans    to service_role;
+grant select, insert, update, delete on drills        to service_role;
+grant select, delete                 on drill_reports to service_role;
+-- likes and daily_stats are intentionally omitted: likes is only touched via
+-- the SECURITY DEFINER toggle_like RPC, and daily_stats via the maintenance
+-- function + admin_* views — all owner-rights, so no direct service_role path.
 
 -- The lookup tables are public reference data, safe to expose.
 -- If the project has "automatically enable RLS on new tables"
