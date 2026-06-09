@@ -424,4 +424,34 @@ ReportResult report_drill(const std::string& drill_id, const std::string& reason
     return out;
 }
 
+ServiceMessageResult get_service_message() {
+    ServiceMessageResult out;
+    if (!opendojo::cloud::auth::ensure_valid()) {
+        out.error_message = "Couldn't connect to OpenDojo Cloud. Try again in a moment.";
+        return out;
+    }
+
+    // The view already filters to active, non-expired rows and orders
+    // newest-first; we only ever want the single most recent one.
+    auto url = opendojo::cloud::rest_url() + "/active_service_messages?select=message&limit=1";
+
+    auto res = opendojo::cloud::http::get(url, standard_headers());
+    if (auto fail = classify_http_failure(res, "load messages"); fail.failed) {
+        out.error_message = std::move(fail.message);
+        return out;
+    }
+
+    auto j = json::parse(res.body, nullptr, false);
+    if (!j.is_array()) {
+        out.error_message = "Couldn't load messages. Please try again.";
+        return out;
+    }
+    if (!j.empty() && j[0].is_object()) {
+        out.message = j[0].value("message", "");
+        out.present = !out.message.empty();
+    }
+    out.ok = true;
+    return out;
+}
+
 }  // namespace opendojo::cloud::api

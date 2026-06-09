@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <mutex>
@@ -200,6 +201,17 @@ void set_upload_status(std::string msg, bool err) {
     g_upload.status_msg = std::move(msg);
     g_upload.status_is_error = err;
 }
+
+// Operator broadcast shown in the window title bar. The render thread
+// reads `text` to build the title; the worker thread writes it on
+// fetch completion. `in_flight` keeps poll_service_message from
+// stacking duplicate fetches while one is outstanding.
+struct ServiceMsgState {
+    std::mutex mtx;
+    std::string text;  // current message ("" = none / not yet fetched)
+    std::atomic<bool> in_flight{false};
+};
+ServiceMsgState g_service_msg;
 
 const char* kSortLabels[] = {"Newest", "Most downloaded", "Most liked"};
 
@@ -912,7 +924,8 @@ void draw_cloud_tab() {
             // three lines for one PushFont/PopFont pair.
             ImFont* stats_font = opendojo::render_hook::small_font();
             if (stats_font) ImGui::PushFont(stats_font);
-            ImGui::Text("%d rec", d.recordings_count);
+            ImGui::Text("%d %s", d.recordings_count,
+                        d.recordings_count == 1 ? "recording" : "recordings");
             ImGui::TextDisabled("%s %s", compact(d.downloads).c_str(),
                                 d.downloads == 1 ? "save" : "saves");
             ImGui::TextDisabled("%s %s", compact(d.likes).c_str(), d.likes == 1 ? "like" : "likes");
@@ -1258,6 +1271,39 @@ void draw_settings_section() {
         auto cur = opendojo::cloud::handle::current();
         std::snprintf(handle_buf, sizeof(handle_buf), "%s", cur.c_str());
     }
+}
+
+void poll_service_message() {
+    if (!opendojo::cloud::configured()) return;
+
+    // Fetch once on first call, then refresh at most every 30 minutes.
+    // poll_service_message is only ever called from the render thread
+    // (menu::draw), so these statics need no synchronization; the
+    // cross-thread handoff is g_service_msg below.
+    using clock = std::chrono::steady_clock;
+    static bool kicked = false;
+    static clock::time_point last_kick{};
+    const auto now = clock::now();
+    if (g_service_msg.in_flight.load()) return;
+    if (kicked && now - last_kick < std::chrono::minutes(30)) return;
+    kicked = true;
+    last_kick = now;
+
+    g_service_msg.in_flight.store(true);
+    opendojo::cloud::worker::submit([]() {
+        auto r = opendojo::cloud::api::get_service_message();
+        g_service_msg.in_flight.store(false);
+        // On failure keep showing whatever we had and retry next
+        // interval — a transient network blip shouldn't blank the bar.
+        if (!r.ok) return;
+        std::lock_guard lk(g_service_msg.mtx);
+        g_service_msg.text = r.present ? r.message : std::string{};
+    });
+}
+
+std::string service_message() {
+    std::lock_guard lk(g_service_msg.mtx);
+    return g_service_msg.text;
 }
 
 }  // namespace opendojo::cloud::ui

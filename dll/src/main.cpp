@@ -31,7 +31,10 @@
 namespace {
 
 void init_thread() {
-    OPENDOJO_LOG("OpenDojo v0.1.0 starting up");
+    // OPENDOJO_DLL_VERSION is the CMake PROJECT_VERSION, baked in as a
+    // compile definition — use it rather than a literal so the log line
+    // can't drift from the real build version.
+    OPENDOJO_LOG("OpenDojo v%s starting up", OPENDOJO_DLL_VERSION);
 
     auto base = opendojo::memory::polaris_base();
     if (!base) {

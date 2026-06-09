@@ -138,6 +138,16 @@ Deno.serve(async (req) => {
     // return that row's id without touching rate limits or inserting
     // a new row. This means re-uploading the same drill is free
     // (good for the user, neutral for us).
+    //
+    // What counts as "the same drill": the client's encoded content
+    // embeds the name + description in its header (see encode_text in
+    // drill.cpp), so contentHash is a hash of recordings AND name AND
+    // description together. Re-uploading the identical recordings under
+    // a different name or with a fuller description therefore produces a
+    // different hash and is stored as a distinct drill — intentional, so
+    // someone can publish a better-described copy of an existing drill.
+    // Only a byte-for-byte identical upload (same recordings, name, and
+    // description) dedupes back to the original row.
     {
         const { data: existing, error } = await admin
             .from("drills")

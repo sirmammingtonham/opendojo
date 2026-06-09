@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 // Cloud-related ImGui surfaces. Pulled out of menu.cpp so the cloud
 // feature has a clean home and menu.cpp doesn't accrete network
 // state. Functions here are called from menu::draw() on the render
@@ -25,5 +27,16 @@ void draw_share_card_body(bool can_export, const char* name, const char* descrip
 // currently just the author handle override field. Renders nothing
 // if cloud isn't configured for this build.
 void draw_settings_section();
+
+// Poll for the operator broadcast message shown in the window title
+// bar. Cheap to call every frame: it kicks one cloud-worker fetch on
+// the first call and at most one every few minutes thereafter, so the
+// render thread never blocks. No-op when cloud isn't configured.
+void poll_service_message();
+
+// The current operator broadcast text, or "" if there's none / it
+// hasn't been fetched yet. Read on the render thread to build the
+// window title. Always safe to call.
+std::string service_message();
 
 }  // namespace opendojo::cloud::ui

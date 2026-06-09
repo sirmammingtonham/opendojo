@@ -167,4 +167,21 @@ struct ReportResult {
 };
 ReportResult report_drill(const std::string& drill_id, const std::string& reason);
 
+// ---- Service message --------------------------------------------------------
+//
+// Operator broadcast surfaced in the mod's title bar ("New update
+// available", maintenance notices, etc.). The server keeps a small
+// service_messages table the admin panel writes to; clients read the
+// single newest active, non-expired row through the
+// active_service_messages view. `present` is false when there is no
+// active message — the caller clears whatever it was showing.
+
+struct ServiceMessageResult {
+    bool ok = false;
+    bool present = false;  // true if there's an active message to show
+    std::string message;   // operator-authored text (1..200 chars)
+    std::string error_message;
+};
+ServiceMessageResult get_service_message();
+
 }  // namespace opendojo::cloud::api

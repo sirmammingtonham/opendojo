@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenDojo
-    VERSION     0.1.0
+    VERSION     0.5.0
     LANGUAGES   CXX
     DESCRIPTION "Tekken 8 practice-mode drill export/import — standalone DLL")
 

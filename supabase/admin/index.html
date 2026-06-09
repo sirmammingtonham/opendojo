@@ -384,6 +384,7 @@ svg.timeseries {
             <div class="tab active" data-tab="dashboard">Dashboard</div>
             <div class="tab" data-tab="drills">Drills</div>
             <div class="tab" data-tab="bans">Bans</div>
+            <div class="tab" data-tab="messages">Messages</div>
             <div class="tab" data-tab="upload">Bulk upload</div>
         </div>
 
@@ -519,6 +520,51 @@ svg.timeseries {
                     </tr>
                 </thead>
                 <tbody id="bans-tbody"></tbody>
+            </table>
+        </div>
+
+        <!-- MESSAGES ---------------------------------------------- -->
+        <div class="tab-pane" id="pane-messages">
+            <div class="card" style="margin-bottom: 16px;">
+                <h2 style="margin-top:0;">Broadcast a message</h2>
+                <p>
+                    Shown in the mod's title bar to every user (e.g. "New update available").
+                    Clients display the single newest <strong>active</strong>, non-expired
+                    message. Keep it short — 200 characters max. Publish a new one to replace
+                    what's showing; deactivate to clear the bar.
+                </p>
+                <div class="row">
+                    <input id="msg-text" type="text" maxlength="200"
+                        placeholder="New update available — grab the latest build from the Discord."
+                        style="flex: 1; min-width: 320px;">
+                    <select id="msg-severity">
+                        <option value="info" selected>info</option>
+                        <option value="warning">warning</option>
+                        <option value="urgent">urgent</option>
+                    </select>
+                    <button class="primary" id="msg-publish">Publish</button>
+                </div>
+            </div>
+
+            <h2>Recent messages</h2>
+            <table>
+                <colgroup>
+                    <col style="width: 48%">
+                    <col style="width: 12%">
+                    <col style="width: 10%">
+                    <col style="width: 18%">
+                    <col style="width: 12%">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>Message</th>
+                        <th>Severity</th>
+                        <th>Active</th>
+                        <th>When</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="msgs-tbody"></tbody>
             </table>
         </div>
 
@@ -1125,6 +1171,89 @@ document.getElementById('ban-add').addEventListener('click', () => {
 });
 
 // ====================================================================
+// Messages tab: operator broadcasts surfaced in the mod's title bar.
+// Writes go straight to the service_messages table (service_role);
+// the mod reads the newest active row via the active_service_messages
+// view.
+// ====================================================================
+async function refreshMessages() {
+    try {
+        const rows = await supa(
+            '/rest/v1/service_messages?select=id,message,severity,active,expires_at,created_at&order=created_at.desc&limit=50');
+        const tb = document.getElementById('msgs-tbody');
+        tb.innerHTML = '';
+        if (!rows.length) {
+            tb.innerHTML = '<tr><td colspan="5" style="color:var(--dim)">No messages yet.</td></tr>';
+            return;
+        }
+        const now = Date.now();
+        for (const m of rows) {
+            const expired = m.expires_at && new Date(m.expires_at).getTime() <= now;
+            const activeCell = !m.active
+                ? '<span style="color:var(--dim)">no</span>'
+                : (expired
+                    ? '<span style="color:var(--amber)">expired</span>'
+                    : '<span style="color:var(--green)">live</span>');
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td class="wrap">${escapeHtml(m.message)}</td>
+                <td>${escapeHtml(m.severity)}</td>
+                <td>${activeCell}</td>
+                <td>${new Date(m.created_at).toLocaleString()}</td>
+                <td>
+                    <div class="actions">
+                        ${m.active
+                            ? `<button data-action="deactivate" data-id="${m.id}">Deactivate</button>`
+                            : `<button data-action="activate" data-id="${m.id}">Activate</button>`}
+                        <button class="destructive" data-action="delete-msg" data-id="${m.id}">Delete</button>
+                    </div>
+                </td>`;
+            tb.appendChild(tr);
+        }
+    } catch (e) { toast('messages: ' + e.message, false); }
+}
+
+document.getElementById('msg-publish').addEventListener('click', async () => {
+    const message = document.getElementById('msg-text').value.trim();
+    const severity = document.getElementById('msg-severity').value;
+    if (!message) { toast('message required', false); return; }
+    try {
+        await supa('/rest/v1/service_messages', {
+            method: 'POST',
+            headers: { 'Prefer': 'return=minimal' },
+            body: JSON.stringify({ message, severity, active: true }),
+        });
+        document.getElementById('msg-text').value = '';
+        toast('published');
+        await refreshMessages();
+    } catch (e) { toast(e.message, false); }
+});
+
+document.getElementById('msg-text').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('msg-publish').click();
+});
+
+document.getElementById('msgs-tbody').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const action = btn.dataset.action;
+    try {
+        if (action === 'activate' || action === 'deactivate') {
+            await supa(`/rest/v1/service_messages?id=eq.${id}`, {
+                method: 'PATCH', body: JSON.stringify({ active: action === 'activate' }),
+            });
+            toast(action === 'activate' ? 'activated' : 'deactivated');
+        } else if (action === 'delete-msg') {
+            if (!confirm('Delete this message permanently?')) return;
+            await supa(`/rest/v1/service_messages?id=eq.${id}`, { method: 'DELETE' });
+            toast('deleted');
+        }
+        await refreshMessages();
+    } catch (e) { toast(e.message, false); }
+});
+
+// ====================================================================
 // Bulk upload tab.
 // ====================================================================
 const uploadPending = [];  // [{ file, parsed: {name, character, cpu_side, recordings_count}, content, status }]
@@ -1267,6 +1396,7 @@ async function refreshAll() {
     await refreshDashboard();
     await refreshDrills();
     await refreshBans();
+    await refreshMessages();
 }
 </script>
 </body>

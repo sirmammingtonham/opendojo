@@ -29,7 +29,7 @@ namespace opendojo::menu {
 
 namespace {
 
-constexpr const char* OPENDOJO_VERSION = "v0.1";
+constexpr const char* OPENDOJO_VERSION = "v0.5";
 
 using clock = std::chrono::steady_clock;
 
@@ -910,13 +910,22 @@ void draw() {
     }
 
     const ImGuiWindowFlags wflags = ImGuiWindowFlags_NoCollapse;
-    char title[64];
-    std::snprintf(title, sizeof(title), "OpenDojo %s###opendojo", OPENDOJO_VERSION);
+    // Operator broadcast (e.g. "New update available") rides in the
+    // title bar after the version. Kick the fetch + read the cached
+    // text here; both are cheap and safe to call every frame. The
+    // visible portion changes when a message arrives, but the window
+    // identity stays pinned by the trailing ###opendojo tag so window
+    // state (position, size, focus) survives the title change.
+    opendojo::cloud::ui::poll_service_message();
+    const std::string svc_msg = opendojo::cloud::ui::service_message();
+    std::string title = std::string("OpenDojo ") + OPENDOJO_VERSION;
+    if (!svc_msg.empty()) title += "   |   " + svc_msg;
+    title += "###opendojo";
 
     // Pass an `open` bool so ImGui draws the X close button. We treat
     // a click on X identically to the toggle hotkey.
     bool open = true;
-    if (!ImGui::Begin(title, &open, wflags)) {
+    if (!ImGui::Begin(title.c_str(), &open, wflags)) {
         ImGui::End();
         if (!open) opendojo::render_hook::toggle_menu();
         return;
