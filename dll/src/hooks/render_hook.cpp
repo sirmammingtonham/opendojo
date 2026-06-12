@@ -92,6 +92,57 @@ HANDLE g_fence_event = nullptr;
 UINT64 g_fence_next = 0;
 
 // ===========================================================================
+//  SRV descriptor pool (ImGui DX12 backend, 1.92+)
+// ===========================================================================
+//
+// Pre-1.92 the DX12 backend took a single font SRV handle. 1.92's dynamic
+// texture system instead asks the app for descriptors on demand (one per
+// font / texture atlas it creates, freed when destroyed), via the alloc/free
+// callbacks on ImGui_ImplDX12_InitInfo. We back that with a small
+// shader-visible CBV/SRV/UAV heap plus this fixed-capacity stack allocator.
+// All calls happen on the render thread (Init / NewFrame), so no locking.
+constexpr UINT SRV_HEAP_SIZE = 64;
+
+struct SrvDescriptorPool {
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_start{};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_start{};
+    UINT inc = 0;
+    UINT free_stack[SRV_HEAP_SIZE]{};
+    int free_top = 0;  // count of free indices currently on the stack
+
+    void init(ID3D12Device* dev, ID3D12DescriptorHeap* heap) {
+        inc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        cpu_start = heap->GetCPUDescriptorHandleForHeapStart();
+        gpu_start = heap->GetGPUDescriptorHandleForHeapStart();
+        free_top = 0;
+        // Push high->low so index 0 is the first one handed out.
+        for (UINT i = SRV_HEAP_SIZE; i-- > 0;)
+            free_stack[free_top++] = i;
+    }
+    void alloc(D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu) {
+        IM_ASSERT(free_top > 0 && "OpenDojo SRV descriptor pool exhausted");
+        const UINT idx = free_stack[--free_top];
+        out_cpu->ptr = cpu_start.ptr + static_cast<SIZE_T>(idx) * inc;
+        out_gpu->ptr = gpu_start.ptr + static_cast<UINT64>(idx) * inc;
+    }
+    void release(D3D12_CPU_DESCRIPTOR_HANDLE cpu) {
+        const UINT idx = static_cast<UINT>((cpu.ptr - cpu_start.ptr) / inc);
+        IM_ASSERT(free_top < static_cast<int>(SRV_HEAP_SIZE));
+        free_stack[free_top++] = idx;
+    }
+};
+SrvDescriptorPool g_srv_pool;
+
+void srv_pool_alloc(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu,
+                    D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
+    g_srv_pool.alloc(cpu, gpu);
+}
+void srv_pool_free(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
+                   D3D12_GPU_DESCRIPTOR_HANDLE) {
+    g_srv_pool.release(cpu);
+}
+
+// ===========================================================================
 //  WndProc subclass (input routing)
 // ===========================================================================
 //
@@ -252,7 +303,10 @@ bool init_imgui_resources(IDXGISwapChain3* swapchain) {
     {
         D3D12_DESCRIPTOR_HEAP_DESC d{};
         d.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        d.NumDescriptors = 1;
+        // 1.92's backend allocates SRVs on demand for its dynamic textures
+        // (see SrvDescriptorPool above), so size the heap as a small pool
+        // rather than the single font slot the pre-1.92 backend needed.
+        d.NumDescriptors = SRV_HEAP_SIZE;
         d.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(g_device->CreateDescriptorHeap(&d, IID_PPV_ARGS(&g_srv_heap)))) {
             OPENDOJO_LOG("render_hook: SRV heap creation failed");
@@ -307,7 +361,13 @@ void load_menu_font(ImGuiIO& io, float pixel_size) {
     // a reference to these arrays until the texture atlas is built.
     static const ImWchar kLatinRange[] = {
         0x0020,
-        0x00FF,  // Basic Latin + Latin-1 Supplement (matches GetGlyphRangesDefault)
+        0x00FF,  // Basic Latin + Latin-1 Supplement
+        // General Punctuation we use in UI captions (en/em dash) plus
+        // what shows up in pasted community drill descriptions (curly
+        // quotes, bullet, ellipsis). Segoe UI has these glyphs, but if
+        // we don't rasterize the range they fall back to '?'.
+        0x2010,
+        0x2027,  // hyphens, dashes, quotes, bullet, ellipsis
         0,
     };
     // Glyphs we want but the primary text font (Segoe UI) does not
@@ -443,9 +503,20 @@ bool init_imgui_runtime() {
     }
 
     OPENDOJO_LOG("render_hook: imgui step 3/4 — DX12 backend");
-    if (!ImGui_ImplDX12_Init(g_device, static_cast<int>(g_buffer_count), g_rtv_format, g_srv_heap,
-                             g_srv_heap->GetCPUDescriptorHandleForHeapStart(),
-                             g_srv_heap->GetGPUDescriptorHandleForHeapStart())) {
+    // 1.92+ init: the backend pulls SRV descriptors from our pool on demand
+    // (font atlas + any dynamic textures), so the allocator must be live
+    // before Init — Init allocates the first font descriptor through it.
+    // g_queue is guaranteed captured by now (hook_present gates init on it).
+    g_srv_pool.init(g_device, g_srv_heap);
+    ImGui_ImplDX12_InitInfo dx12_info = {};
+    dx12_info.Device = g_device;
+    dx12_info.CommandQueue = g_queue;
+    dx12_info.NumFramesInFlight = static_cast<int>(g_buffer_count);
+    dx12_info.RTVFormat = g_rtv_format;
+    dx12_info.SrvDescriptorHeap = g_srv_heap;
+    dx12_info.SrvDescriptorAllocFn = srv_pool_alloc;
+    dx12_info.SrvDescriptorFreeFn = srv_pool_free;
+    if (!ImGui_ImplDX12_Init(&dx12_info)) {
         OPENDOJO_LOG("render_hook: ImGui_ImplDX12_Init failed");
         return false;
     }

@@ -575,9 +575,10 @@ void draw_recordings_tab() {
 
     ImGui::InputTextMultiline(
         "##export_desc", g_state.export_description, sizeof(g_state.export_description),
-        ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2));
+        ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2),
+        ImGuiInputTextFlags_WordWrap);
     nav_recenter();
-    ImGui::TextDisabled("Description (optional)");
+    ImGui::TextDisabled("Description (optional, up to 1000 chars)");
 
     ImGui::Spacing();
     ImGui::Spacing();

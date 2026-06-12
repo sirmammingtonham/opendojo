@@ -154,6 +154,15 @@ struct BrowseState {
     int offset = 0;
     bool initial_load_done = false;
 
+    // Last CPU character we auto-applied to the character filter. The
+    // tab follows the live in-game CPU: when you switch the character
+    // you're training against, the Browse filter re-points to the new
+    // one. A manual combo pick doesn't move the detected character, so
+    // it stays equal to this and we don't clobber the user's choice —
+    // we only re-point when the in-game character actually changes.
+    // Empty until the first detection.
+    std::string auto_cpu_char;
+
     // Pending owner-delete target. See the matching pattern in
     // menu.cpp's draw_drills_tab — OpenPopup must happen at the
     // same ID-stack level as BeginPopupModal, so we defer.
@@ -524,15 +533,32 @@ void draw_cloud_tab() {
         return;
     }
 
-    // First time the tab renders, seed the character filter from the
-    // detected CPU and kick off the default search so the user lands
-    // on a populated list. After this initial seed the combo is
-    // user-controlled.
-    if (!g_browse.initial_load_done) {
+    // Keep the character filter pointed at whoever you're training
+    // against. detect_cpu() is a handful of SEH-guarded reads (the
+    // Export tab already calls it every frame), so polling it here is
+    // cheap. We act only when the detected character *changes*: that
+    // covers the first detection (seed) and every later in-practice
+    // character swap (re-point). A manual combo pick doesn't change the
+    // detected character, so it survives until you switch characters in
+    // game. The re-query only fires in Browse mode, where the filter
+    // matters — My uploads ignores it, but the combo index still
+    // updates so switching back to Browse lands on the right character.
+    auto cpu = opendojo::players::detect_cpu();
+    if (cpu.detected && cpu.character_name != g_browse.auto_cpu_char) {
+        g_browse.auto_cpu_char = cpu.character_name;
+        int idx = roster_index_of(cpu.character_name);
+        g_browse.character_combo_idx = idx >= 0 ? (kCharComboRosterBase + idx) : kCharComboAll;
+        g_browse.offset = 0;
+        if (!g_browse.initial_load_done || g_browse.mode == Mode::Browse) {
+            g_browse.initial_load_done = true;
+            kick_list();
+        }
+    } else if (!g_browse.initial_load_done) {
+        // No CPU detected yet (outside a match) on the first render:
+        // still kick the initial query once so the tab isn't empty.
+        // The filter defaults to "All characters" until a CPU appears.
         g_browse.initial_load_done = true;
-        auto cpu = opendojo::players::detect_cpu();
-        int seed = roster_index_of(cpu.detected ? cpu.character_name : std::string{});
-        g_browse.character_combo_idx = seed >= 0 ? (kCharComboRosterBase + seed) : kCharComboAll;
+        g_browse.character_combo_idx = kCharComboAll;
         kick_list();
     }
 
@@ -992,9 +1018,10 @@ void draw_cloud_tab() {
     // BeginPopupModal; in-row clicks set the flag and we open here.
     if (g_browse.delete_modal_open_requested) {
         g_browse.delete_modal_open_requested = false;
-        ImGui::OpenPopup("DeleteCloudDrill");
+        ImGui::OpenPopup("Delete drill###DeleteCloudDrill");
     }
-    if (ImGui::BeginPopupModal("DeleteCloudDrill", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (ImGui::BeginPopupModal("Delete drill###DeleteCloudDrill", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Delete this drill?");
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1), "%s",
@@ -1016,19 +1043,19 @@ void draw_cloud_tab() {
     // The buffers were pre-filled at click time; Save kicks the API.
     if (g_browse.edit_modal_open_requested) {
         g_browse.edit_modal_open_requested = false;
-        ImGui::OpenPopup("EditCloudDrill");
+        ImGui::OpenPopup("Edit drill###EditCloudDrill");
     }
     // SetNextWindowSize must be called immediately before the matching
     // Begin* call — issuing it on the OpenPopup frame doesn't carry
     // over to the BeginPopupModal frame, which is why the previous
     // attempt left the modal at its auto-sized (skinny) default.
-    // Width also bumped to give Description real room; ImGui's
-    // InputTextMultiline does not word-wrap, so a wider box is the
-    // only way to keep typical descriptions visible in one line.
+    // Width also gives Description real room; the field word-wraps
+    // (ImGuiInputTextFlags_WordWrap), so a wider box means fewer wrapped
+    // lines and a more readable paragraph.
     ImGui::SetNextWindowSize(ImVec2(760, 0), ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("EditCloudDrill", nullptr, 0)) {
-        ImGui::Text("Edit drill");
-        ImGui::Spacing();
+    if (ImGui::BeginPopupModal("Edit drill###EditCloudDrill", nullptr, 0)) {
+        // The window title bar carries "Edit drill" (text before ###); the
+        // original drill name here orients the user on what they're editing.
         ImGui::TextDisabled("%s", g_browse.edit_target_original_name.c_str());
         ImGui::Spacing();
         // Inputs stretch to the modal width so long lines have the
@@ -1039,12 +1066,11 @@ void draw_cloud_tab() {
         ImGui::TextDisabled("Name (1-96 chars)");
 
         ImGui::Spacing();
-        ImGui::InputTextMultiline("##editdesc", g_browse.edit_desc_buf,
-                                  sizeof(g_browse.edit_desc_buf),
-                                  ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 5 +
-                                                       ImGui::GetStyle().FramePadding.y * 2));
-        ImGui::TextDisabled(
-            "Description (optional, up to 1000 chars — press Enter for paragraph breaks)");
+        ImGui::InputTextMultiline(
+            "##editdesc", g_browse.edit_desc_buf, sizeof(g_browse.edit_desc_buf),
+            ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2),
+            ImGuiInputTextFlags_WordWrap);
+        ImGui::TextDisabled("Description (optional, up to 1000 chars)");
 
         ImGui::Spacing();
         ImGui::TextDisabled("Tags (optional)");
@@ -1102,9 +1128,10 @@ void draw_cloud_tab() {
     // ---- Report modal ------------------------------------------------
     if (g_browse.report_modal_open_requested) {
         g_browse.report_modal_open_requested = false;
-        ImGui::OpenPopup("ReportCloudDrill");
+        ImGui::OpenPopup("Report drill###ReportCloudDrill");
     }
-    if (ImGui::BeginPopupModal("ReportCloudDrill", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (ImGui::BeginPopupModal("Report drill###ReportCloudDrill", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Report this drill?");
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1), "%s",
@@ -1115,7 +1142,8 @@ void draw_cloud_tab() {
         ImGui::PushItemWidth(380);
         ImGui::InputTextMultiline(
             "##reportreason", g_browse.report_reason_buf, sizeof(g_browse.report_reason_buf),
-            ImVec2(380, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2));
+            ImVec2(380, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2),
+            ImGuiInputTextFlags_WordWrap);
         ImGui::PopItemWidth();
         ImGui::Spacing();
         if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
