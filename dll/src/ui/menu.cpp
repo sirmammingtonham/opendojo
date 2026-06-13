@@ -469,6 +469,12 @@ void draw_drills_tab() {
         g_state.delete_modal_open_requested = false;
         ImGui::OpenPopup("DeleteLocalDrill");
     }
+    // Center the dialog on screen instead of letting it default to the
+    // top-left. ImGuiCond_Always (not Appearing): an AlwaysAutoResize modal
+    // is hidden for a measure frame, and Appearing-centering doesn't re-apply
+    // on the sized frame — Always re-centers each frame so it lands right.
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always,
+                            ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("DeleteLocalDrill", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Delete this drill?");
         ImGui::Spacing();

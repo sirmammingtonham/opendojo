@@ -90,6 +90,20 @@ bool destructive_button(const char* label, const ImVec2& size = ImVec2(0, 0)) {
     return clicked;
 }
 
+// Center the next popup on screen (the menu sits at the viewport center, so
+// this lands the dialog over it). Call right before BeginPopupModal.
+//
+// We use ImGuiCond_Always, not Appearing: an AlwaysAutoResize modal is hidden
+// for one frame while ImGui measures its size, and the Appearing pivot-center
+// doesn't reliably re-apply on the following (sized) frame — so those modals
+// stuck to the top-left. Always re-centers every frame, which lands correctly
+// once the size is known. The only cost is the dialog can't be dragged
+// off-center, which is the right behavior for a modal anyway.
+void center_next_modal_on_menu() {
+    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+}
+
 // Character-combo indices we use internally:
 //   0      = "All characters" (no filter)
 //   1..N   = explicit roster pick — index into players::character_roster()
@@ -1052,6 +1066,7 @@ void draw_cloud_tab() {
         g_browse.delete_modal_open_requested = false;
         ImGui::OpenPopup("Delete drill###DeleteCloudDrill");
     }
+    center_next_modal_on_menu();
     if (ImGui::BeginPopupModal("Delete drill###DeleteCloudDrill", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Delete this drill?");
@@ -1084,6 +1099,7 @@ void draw_cloud_tab() {
     // Width also gives Description real room; the field word-wraps
     // (ImGuiInputTextFlags_WordWrap), so a wider box means fewer wrapped
     // lines and a more readable paragraph.
+    center_next_modal_on_menu();
     ImGui::SetNextWindowSize(ImVec2(760, 0), ImGuiCond_Appearing);
     if (ImGui::BeginPopupModal("Edit drill###EditCloudDrill", nullptr, 0)) {
         // The window title bar carries "Edit drill" (text before ###); the
@@ -1162,6 +1178,7 @@ void draw_cloud_tab() {
         g_browse.report_modal_open_requested = false;
         ImGui::OpenPopup("Report drill###ReportCloudDrill");
     }
+    center_next_modal_on_menu();
     if (ImGui::BeginPopupModal("Report drill###ReportCloudDrill", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Report this drill?");
