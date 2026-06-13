@@ -29,6 +29,11 @@ struct DrillHeader {
     std::filesystem::file_time_type mtime{};  // filesystem mtime, drives "Newest" sort
     std::size_t recording_count = 0;
     bool is_autosave = false;  // filename starts with "_autosave_"
+    // Cloud drill id (uuid) this file was downloaded from, or empty if the
+    // drill is local-only. Stamped into the file header by save_drill_text
+    // when a cloud download lands; lets the Cloud tab tell which community
+    // drills are already in the user's library.
+    std::string cloud_id;
 };
 
 // Scan opendojo/ and return one entry per drill file (`*.drill.txt`).
@@ -96,12 +101,18 @@ void show_status();
 // path; on failure path is empty and `message` says why. Used by the
 // cloud Browse tab when a downloaded drill needs to land on disk
 // before the player imports it via the existing Drills tab buttons.
+//
+// `cloud_id`, when non-empty, is stamped into the saved file's header as a
+// `cloud_id:` line so the Cloud tab can later recognize this drill as
+// already-downloaded. Unknown header keys are ignored by the decoder, so
+// this stays forward/backward compatible.
 struct SaveResult {
     bool ok = false;
     std::filesystem::path path;
     std::string message;
 };
-SaveResult save_drill_text(std::string_view display_name, std::string_view content);
+SaveResult save_drill_text(std::string_view display_name, std::string_view content,
+                           std::string_view cloud_id = {});
 
 // Compose an encoded drill (the same text export_current_slots would
 // write to disk) from the live slot state, plus the metadata the

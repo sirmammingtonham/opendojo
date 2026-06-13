@@ -39,4 +39,10 @@ void poll_service_message();
 // window title. Always safe to call.
 std::string service_message();
 
+// Mark the Cloud tab's "already downloaded" index stale so it re-scans the
+// local drills folder on its next render. Call whenever the local library
+// changes (download / delete / export) so the Browse list's "Downloaded"
+// markers and disabled Download buttons stay in sync. Cheap; thread-safe.
+void mark_local_library_dirty();
+
 }  // namespace opendojo::cloud::ui

@@ -214,6 +214,10 @@ void refresh_drills_if_needed() {
                   return a.name < b.name;
               });
     g_state.drills_dirty = false;
+    // The local library just changed (download / delete / export / copy);
+    // let the Cloud tab re-scan so its "Downloaded" markers stay accurate
+    // — e.g. deleting a downloaded drill re-enables its Download button.
+    opendojo::cloud::ui::mark_local_library_dirty();
 }
 
 // ---- Tabs ------------------------------------------------------------------

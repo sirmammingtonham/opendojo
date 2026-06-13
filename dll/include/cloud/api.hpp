@@ -31,6 +31,7 @@ struct DrillSummary {
     std::string difficulty;               // "" / "beginner" / "intermediate" / "advanced"
     std::string created_at;               // ISO-8601 from server; for UI only
     bool is_mine = false;                 // server says: uploader_id == auth.uid()
+    bool is_liked = false;                // server says: current user has liked this
 };
 
 struct ListResult {

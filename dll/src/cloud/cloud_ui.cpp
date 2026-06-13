@@ -128,11 +128,10 @@ struct BrowseState {
     bool loading = false;
     std::string error;
 
-    // Drills the user has toggled-liked since this session started.
-    // The server tracks the real (user, drill) like set; this is just
-    // a UI optimization so the heart icon reflects the latest toggle
-    // without us refetching the list.
-    std::set<std::string> liked_session;
+    // Per-drill "I liked this" state lives on each DrillSummary (is_liked),
+    // seeded from the server's liked_by_me on every list fetch and flipped
+    // optimistically by kick_toggle_like — so the heart survives a menu
+    // close/reopen and a game restart, and the user can't re-like to inflate.
 
     // Drill ids whose description block is expanded (full text shown
     // inline). Caret toggles membership. Set lives on the render
@@ -189,6 +188,29 @@ struct BrowseState {
 };
 
 BrowseState g_browse;
+
+// Index of cloud drill ids already present in the local library, so the
+// Browse list can mark them "Downloaded" and disable re-download. Built by
+// scanning local drill headers for the `cloud_id` stamp save_drill_text
+// writes. `cloud_ids` is touched only on the render thread (rebuilt when
+// `dirty` is set); the cloud worker just flips `dirty` after a download so
+// the next frame re-scans. Starts dirty so the first Browse render scans.
+struct LocalLibraryIndex {
+    std::set<std::string> cloud_ids;
+    std::atomic<bool> dirty{true};
+};
+LocalLibraryIndex g_local;
+
+// Rescan the local drills folder for cloud_id stamps. Render-thread only
+// (does filesystem I/O, same cost as the Drills tab's own refresh).
+void refresh_local_index_if_dirty() {
+    if (!g_local.dirty.exchange(false)) return;
+    std::set<std::string> ids;
+    for (const auto& d : opendojo::commands::list_drills()) {
+        if (!d.cloud_id.empty()) ids.insert(d.cloud_id);
+    }
+    g_local.cloud_ids = std::move(ids);
+}
 
 // Upload-side state. The Tag/Difficulty pickers in the Export tab
 // write here; kick_upload reads at submit time.
@@ -334,17 +356,14 @@ void kick_toggle_like(const std::string& drill_id) {
                                         true);
             return;
         }
-        // Flip session-local "i liked this" set, and patch the cached
-        // summary so the table updates immediately without a refetch.
+        // Patch the cached summary so the table updates immediately without
+        // a refetch: flip is_liked (the toggle succeeded, so the state is now
+        // the opposite of what the button showed) and adopt the server's new
+        // like count. A later list fetch re-seeds is_liked from liked_by_me.
         std::lock_guard lk(g_browse.mtx);
-        auto it = g_browse.liked_session.find(drill_id);
-        if (it == g_browse.liked_session.end()) {
-            g_browse.liked_session.insert(drill_id);
-        } else {
-            g_browse.liked_session.erase(it);
-        }
         for (auto& d : g_browse.results) {
             if (d.id == drill_id) {
+                d.is_liked = !d.is_liked;
                 d.likes = r.likes;
                 break;
             }
@@ -442,13 +461,16 @@ void kick_download(const std::string& drill_id, const std::string& display_name)
             return;
         }
         auto save = opendojo::commands::save_drill_text(
-            display_name.empty() ? r.drill.name : display_name, r.drill.content);
+            display_name.empty() ? r.drill.name : display_name, r.drill.content, drill_id);
         if (!save.ok) {
             opendojo::menu::queue_toast("Downloaded, but couldn't save it locally.", true);
             return;
         }
         opendojo::menu::queue_toast("Downloaded: " + save.path.filename().string(), false);
         opendojo::menu::queue_drills_refresh();
+        // The local library changed — make the Browse list re-scan so this
+        // drill flips to "Downloaded" on the next frame.
+        g_local.dirty.store(true);
     });
 }
 
@@ -739,13 +761,9 @@ void draw_cloud_tab() {
         return;
     }
 
-    // Snapshot liked-session set so the table loop reads a
-    // consistent view this frame.
-    std::set<std::string> liked_now;
-    {
-        std::lock_guard lk(g_browse.mtx);
-        liked_now = g_browse.liked_session;
-    }
+    // Refresh the "already downloaded" index if a download landed since the
+    // last frame (or this is the first Browse render). Cheap no-op when clean.
+    refresh_local_index_if_dirty();
 
     const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                   ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
@@ -765,7 +783,9 @@ void draw_cloud_tab() {
             ImGui::TableSetupColumn("Delete", ImGuiTableColumnFlags_WidthFixed, del_w);
         } else {
             const float like_w = ImGui::CalcTextSize("Unlike").x + pad * 4;
-            const float dl_w = ImGui::CalcTextSize("Download").x + pad * 4;
+            // Size for "Downloaded" (the wider of the two states) so the
+            // button text never clips once a drill is in the library.
+            const float dl_w = ImGui::CalcTextSize("Downloaded").x + pad * 4;
             ImGui::TableSetupColumn("Like", ImGuiTableColumnFlags_WidthFixed, like_w);
             ImGui::TableSetupColumn("Download", ImGuiTableColumnFlags_WidthFixed, dl_w);
         }
@@ -1001,12 +1021,24 @@ void draw_cloud_tab() {
                 }
             } else {
                 ImGui::TableSetColumnIndex(4);
-                const bool i_liked = liked_now.count(d.id) > 0;
-                if (ImGui::Button(i_liked ? "Unlike" : "Like", ImVec2(-1, 0))) {
+                if (ImGui::Button(d.is_liked ? "Unlike" : "Like", ImVec2(-1, 0))) {
                     kick_toggle_like(d.id);
                 }
                 ImGui::TableSetColumnIndex(5);
-                if (ImGui::Button("Download", ImVec2(-1, 0))) { kick_download(d.id, d.name); }
+                // Drills already in the local library show a disabled
+                // "Downloaded" instead of "Download" — re-downloading would
+                // just write a duplicate file (and the server counts a
+                // download once per user regardless).
+                if (g_local.cloud_ids.count(d.id) > 0) {
+                    ImGui::BeginDisabled();
+                    ImGui::Button("Downloaded", ImVec2(-1, 0));
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip("Already in your drills");
+                    }
+                } else if (ImGui::Button("Download", ImVec2(-1, 0))) {
+                    kick_download(d.id, d.name);
+                }
             }
             ImGui::PopID();
         }
@@ -1332,6 +1364,10 @@ void poll_service_message() {
 std::string service_message() {
     std::lock_guard lk(g_service_msg.mtx);
     return g_service_msg.text;
+}
+
+void mark_local_library_dirty() {
+    g_local.dirty.store(true);
 }
 
 }  // namespace opendojo::cloud::ui

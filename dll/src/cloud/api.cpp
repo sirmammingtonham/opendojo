@@ -144,6 +144,7 @@ DrillSummary parse_summary(const json& row) {
     s.difficulty = row.value("difficulty", "");
     s.created_at = row.value("created_at", "");
     s.is_mine = row.value("is_mine", false);
+    s.is_liked = row.value("liked_by_me", false);
     // categories is a Postgres text[] coming through PostgREST as a
     // JSON array. Missing or non-array => empty list.
     if (row.contains("categories") && row["categories"].is_array()) {

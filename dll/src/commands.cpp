@@ -104,6 +104,8 @@ bool parse_header_only(const std::filesystem::path& path, DrillHeader& out) {
             out.character = val;
         else if (key == "cpu_side")
             out.cpu_side = val;
+        else if (key == "cloud_id")
+            out.cloud_id = val;
         else if (key == "recordings") {
             try {
                 out.recording_count = static_cast<std::size_t>(std::stoul(val));
@@ -435,7 +437,33 @@ DrillPayload build_current_slots_payload(std::string_view drill_name,
     return r;
 }
 
-SaveResult save_drill_text(std::string_view display_name, std::string_view content) {
+// Insert a `cloud_id:` header line into an encoded drill so a downloaded
+// file remembers which community drill it came from. Placed right after the
+// leading "# OpenDojo drill" comment line; if there's no newline (degenerate
+// content) we just append. decode_text / parse_header_only ignore unknown
+// header keys, so this never breaks parsing.
+std::string stamp_cloud_id(std::string_view content, std::string_view cloud_id) {
+    std::string line = "cloud_id:     ";
+    line.append(cloud_id);
+    line.push_back('\n');
+
+    auto nl = content.find('\n');
+    std::string out;
+    out.reserve(content.size() + line.size() + 1);
+    if (nl == std::string_view::npos) {
+        out.append(content);
+        if (!out.empty() && out.back() != '\n') out.push_back('\n');
+        out.append(line);
+    } else {
+        out.append(content.substr(0, nl + 1));
+        out.append(line);
+        out.append(content.substr(nl + 1));
+    }
+    return out;
+}
+
+SaveResult save_drill_text(std::string_view display_name, std::string_view content,
+                           std::string_view cloud_id) {
     SaveResult r;
     if (!ensure_drills_dir()) {
         r.message = "couldn't create drills directory";
@@ -447,7 +475,15 @@ SaveResult save_drill_text(std::string_view display_name, std::string_view conte
         r.message = "filename collision storm — pick a different name";
         return r;
     }
-    if (!write_whole_file(path, content.data(), content.size())) {
+    // Stamp the originating cloud id into the header when present, so the
+    // Cloud tab can recognize this drill as already in the library.
+    std::string stamped;
+    std::string_view to_write = content;
+    if (!cloud_id.empty()) {
+        stamped = stamp_cloud_id(content, cloud_id);
+        to_write = stamped;
+    }
+    if (!write_whole_file(path, to_write.data(), to_write.size())) {
         r.message = "failed to write drill file";
         return r;
     }
