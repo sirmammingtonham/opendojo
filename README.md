@@ -19,7 +19,7 @@ Demo: https://www.youtube.com/watch?v=hpciOVFaxrw
   "Replace all")
 - **OpenDojo Cloud** (in-game): browse drills uploaded by other players,
   filter to your CPU character, one-click download. Upload your own drills
-  in one click from the Export tab — no account, no signup
+  in one click from the Export tab — no signup needed
 - **Autosave per character**: opt in and your last recording is snapshotted
   per CPU character and restored when you load against that character again
 - In-game overlay menu with keyboard + controller navigation
@@ -33,12 +33,16 @@ Demo: https://www.youtube.com/watch?v=hpciOVFaxrw
 OpenDojo ships as a single DLL that masquerades as `dinput8.dll` — Tekken
 auto-loads it on launch.
 
-1. Grab `dinput8.dll` from the latest release.
+1. Grab `dinput8.dll` from the latest release (https://github.com/sirmammingtonham/opendojo/releases/latest/download/dinput8.dll).
 2. Drop it into Tekken's `Win64` folder, next to `Polaris-Win64-Shipping.exe`:
 
    ```
    <SteamLibrary>\steamapps\common\TEKKEN 8\Polaris\Binaries\Win64\dinput8.dll
    ```
+
+   * <img src="docs/HJYo7VkXQAMSCKG.png" width="400" height="267">
+   * <img src="docs/HJYo_ENX0AATUwG.png" width="400" height="285">
+   * <img src="docs/HJYpMCgXgAAJegf.png" width="400" height="359">
 
 3. Launch the game normally. That's it.
 
@@ -136,7 +140,7 @@ everything else works normally.
 
 ## Compatibility
 
-- Tekken 8 v3.00.02. Other versions may shift the memory offsets the mod uses — they'd need re-resolving.
+- Tekken 8 v3.01.01. Other versions may shift the memory offsets the mod uses — they'd need re-resolving.
 - Windows 10/11, x64.
 - Should coexist with other `dinput8.dll`-style proxy mods only if you stack
   them via an injector — both can't live at the same filename.
