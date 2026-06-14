@@ -161,7 +161,7 @@ struct BrowseState {
     char search_buf[96] = "";
     // -1 = uninitialized; first draw seeds from the detected CPU.
     int character_combo_idx = -1;
-    bool category_filter[kCategoryCount] = {false, false, false, false, false};
+    bool category_filter[kCategoryCount] = {};
     int difficulty_filter_idx = 0;  // 0 = Any
     int sort_idx = 0;               // 0 Newest, 1 Downloaded, 2 Liked
     int offset = 0;

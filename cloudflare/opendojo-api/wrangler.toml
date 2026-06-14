@@ -23,7 +23,7 @@ enabled = false
 # Sizing notes:
 #   * GENERAL = the drill_summaries list query only. Category/difficulty lookups
 #     are client-side constants (not fetched), so a Browse open / filter / page
-#     is 1 request each — no fan-out. 20/min covers heavy browsing + the list
+#     is 1 request each — no fan-out. 30/min covers heavy browsing + the list
 #     refresh that fires after each download.
 #   * SIGNUP / token-refresh are also capped by Supabase's own [auth.rate_limit]
 #     (anon signups 5/hr per IP), so these worker buckets only stop bursts.
@@ -66,7 +66,7 @@ simple = { limit = 5, period = 60 }
 [[ratelimits]]
 name = "RL_GENERAL"
 namespace_id = "1007"
-simple = { limit = 20, period = 60 }
+simple = { limit = 30, period = 60 }
 
 # Staging — `wrangler deploy --env staging`. Separate script + workers.dev URL,
 # its own secrets (set with `--env staging`), and distinct rate-limit
@@ -113,4 +113,4 @@ simple = { limit = 5, period = 60 }
 [[env.staging.ratelimits]]
 name = "RL_GENERAL"
 namespace_id = "2007"
-simple = { limit = 20, period = 60 }
+simple = { limit = 30, period = 60 }
