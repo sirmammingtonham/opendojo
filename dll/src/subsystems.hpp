@@ -16,12 +16,9 @@
 
 namespace opendojo::subsystems {
 
-// Service-locator context pointer offset in Polaris's image.
-// TODO: migrate to AOB-from-xref. Currently the only data offset that's
-// still hardcoded — every other slot we touch (POOL1/POOL2, the practice
-// singleton slot) is resolved by signatures::*_addr() from a code xref.
-// CTX needs its own anchor function; the existing AOB-resolved functions
-// don't reference it.
+// Service-locator context pointer offset in Polaris's image. Fallback
+// only: lookup() prefers signatures::ctx_ptr_addr(), which resolves CTX
+// AOB-from-xref via the get_ctx anchor (GET_CTX_SIG in signatures.cpp).
 inline constexpr std::uintptr_t CTX_PTR_OFFSET = 0x9537300;
 
 // Subsystem hash keys. These were previously offsets into .data that held

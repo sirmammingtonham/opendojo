@@ -56,8 +56,8 @@ std::uintptr_t opendojo::subsystems::lookup(std::uint32_t hash) {
 }
 
 bool opendojo::subsystems::in_practice() {
-    // Driven by the practice-controller ctor/dtor hooks in
-    // practice_state.cpp — a single atomic load, no polling.
+    // Delegates to practice_state, which polls the practice-controller
+    // slot (and drives autosave on the entry transition).
     return practice_state::is_active();
 }
 

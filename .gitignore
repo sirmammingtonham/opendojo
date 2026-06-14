@@ -13,6 +13,9 @@ CTestTestfile.cmake
 compile_commands.json
 install_manifest.txt
 
+# CMake per-user presets (machine-specific paths)
+CMakeUserPresets.json
+
 # Visual Studio user state
 .vs/
 *.user
