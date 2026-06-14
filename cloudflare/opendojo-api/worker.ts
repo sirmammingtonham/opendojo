@@ -23,6 +23,8 @@ function deny(status: number, msg: string, extra?: HeadersInit): Response {
     });
 }
 
+// Allowlist: returns a bucket for a recognized path, else null (denied, not
+// proxied).
 function bindingFor(path: string, env: Env): RateLimit | null {
     if (path.startsWith("/auth/v1/signup"))             return env.RL_SIGNUP;
     if (path.startsWith("/functions/v1/submit_drill"))  return env.RL_SUBMIT;
@@ -61,12 +63,14 @@ const handler: ExportedHandler<Env> = {
             return deny(400, "bad path");
         }
 
+        // No binding = not on the allowlist; deny rather than proxy unthrottled.
         const rl = bindingFor(path, env);
-        if (rl) {
-            const { success } = await rl.limit({ key: ip });
-            if (!success) {
-                return deny(429, "Too many requests. Slow down.", { "retry-after": "60" });
-            }
+        if (!rl) {
+            return deny(403, "forbidden");
+        }
+        const { success } = await rl.limit({ key: ip });
+        if (!success) {
+            return deny(429, "Too many requests. Slow down.", { "retry-after": "60" });
         }
 
         const target = new URL(`https://${env.SUPABASE_REF}.supabase.co`);
