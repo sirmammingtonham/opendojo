@@ -33,16 +33,16 @@ Demo: https://www.youtube.com/watch?v=hpciOVFaxrw
 OpenDojo ships as a single DLL that masquerades as `dinput8.dll` — Tekken
 auto-loads it on launch.
 
-1. Grab `dinput8.dll` from the latest release (https://github.com/sirmammingtonham/opendojo/releases/latest/download/dinput8.dll).
+1. Grab `dinput8.dll` from the latest release: https://github.com/sirmammingtonham/opendojo/releases/latest/download/dinput8.dll
 2. Drop it into Tekken's `Win64` folder, next to `Polaris-Win64-Shipping.exe`:
 
    ```
    <SteamLibrary>\steamapps\common\TEKKEN 8\Polaris\Binaries\Win64\dinput8.dll
    ```
 
-   * <img src="docs/HJYo7VkXQAMSCKG.png" width="400" height="267">
-   * <img src="docs/HJYo_ENX0AATUwG.png" width="400" height="285">
-   * <img src="docs/HJYpMCgXgAAJegf.png" width="400" height="359">
+   1. <img src="docs/HJYo7VkXQAMSCKG.png" width="400" height="267">
+   2. <img src="docs/HJYo_ENX0AATUwG.png" width="400" height="285">
+   3. <img src="docs/HJYpMCgXgAAJegf.png" width="400" height="359">
 
 3. Launch the game normally. That's it.
 

@@ -73,9 +73,13 @@ bool apply_auth_response(const std::string& body, Token& out) {
     if (access.empty() || refresh.empty()) return false;
 
     std::string uid;
-    if (j.contains("user") && j["user"].is_object()) { uid = j["user"].value("id", std::string{}); }
+    if (j.contains("user") && j["user"].is_object()) {
+        uid = j["user"].value("id", std::string{});
+    }
     // Refresh tokens carry the user id back too, but only on refresh.
-    if (uid.empty()) { uid = j.value("user_id", std::string{}); }
+    if (uid.empty()) {
+        uid = j.value("user_id", std::string{});
+    }
 
     out.access = std::move(access);
     out.refresh = std::move(refresh);

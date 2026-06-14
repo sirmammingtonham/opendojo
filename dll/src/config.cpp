@@ -53,7 +53,9 @@ std::filesystem::path config_path() {
 std::filesystem::path appdata_root() {
     wchar_t buf[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) { return std::filesystem::path(buf) / L"OpenDojo"; }
+    if (n > 0 && n < MAX_PATH) {
+        return std::filesystem::path(buf) / L"OpenDojo";
+    }
     return opendojo::commands::drills_dir();
 }
 

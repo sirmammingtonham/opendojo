@@ -289,7 +289,9 @@ std::vector<std::string> character_roster() {
     std::vector<std::string> out;
     out.reserve(48);
     for (std::uint32_t id = 0; id <= kPlayableIdMax; ++id) {
-        if (auto n = character_name_internal(id)) { out.emplace_back(n); }
+        if (auto n = character_name_internal(id)) {
+            out.emplace_back(n);
+        }
     }
     std::sort(out.begin(), out.end());
     return out;

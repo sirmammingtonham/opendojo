@@ -48,7 +48,9 @@ std::uintptr_t opendojo::subsystems::lookup(std::uint32_t hash) {
     // — real chains are short, anything deeper means the data is corrupt
     // or we've snapshotted mid-resize.
     for (int steps = 0; entry && entry != sentinel && steps < 64; ++steps) {
-        if (memory::read_u32(entry + 0x10) == hash) { return memory::read_u64(entry + 0x18); }
+        if (memory::read_u32(entry + 0x10) == hash) {
+            return memory::read_u64(entry + 0x18);
+        }
         if (entry == first) break;
         entry = memory::read_u64(entry + 8);
     }

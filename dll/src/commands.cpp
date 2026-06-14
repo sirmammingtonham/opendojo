@@ -109,7 +109,9 @@ bool parse_header_only(const std::filesystem::path& path, DrillHeader& out) {
         else if (key == "recordings") {
             try {
                 out.recording_count = static_cast<std::size_t>(std::stoul(val));
-            } catch (...) { out.recording_count = 0; }
+            } catch (...) {
+                out.recording_count = 0;
+            }
         }
     }
     if (out.character.empty()) out.character = "unknown";
@@ -406,7 +408,9 @@ DrillPayload build_current_slots_payload(std::string_view drill_name,
     d.name = drill_name.empty() ? timestamp_name() : std::string(drill_name);
     d.description = std::string(description);
     d.character = cpu.detected ? cpu.character_name : "unknown";
-    if (cpu.detected) { d.cpu_side = opendojo::players::side_to_string(cpu.cpu_side); }
+    if (cpu.detected) {
+        d.cpu_side = opendojo::players::side_to_string(cpu.cpu_side);
+    }
 
     for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
         auto slot_kind = opendojo::slot::kind(i);

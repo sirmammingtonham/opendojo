@@ -98,14 +98,17 @@ jobs:
         working-directory: cloudflare/opendojo-api
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: cloudflare/opendojo-api/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck       # tsc --noEmit (strict)
-      - run: npm run bundle          # wrangler --dry-run: validates the bundle, no deploy
+          node-version: 22          # wrangler 4.x requires Node >= 22
+          cache: pnpm
+          cache-dependency-path: cloudflare/opendojo-api/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck       # tsc --noEmit (strict)
+      - run: pnpm run bundle          # wrangler --dry-run: validates the bundle, no deploy
 
   # ---- SQL migration -----------------------------------------------------
   # Primary gate: apply the migration to a REAL Supabase Postgres (correct

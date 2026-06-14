@@ -1076,7 +1076,9 @@ void draw_cloud_tab() {
         ImGui::Spacing();
         ImGui::TextWrapped("Other players will lose access immediately. This can't be undone.");
         ImGui::Spacing();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::SameLine();
         if (destructive_button("Delete", ImVec2(120, 0))) {
             kick_delete_my_drill(g_browse.delete_target_id, g_browse.delete_target_name);
@@ -1143,7 +1145,9 @@ void draw_cloud_tab() {
         ImGui::PopItemWidth();
 
         ImGui::Spacing();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::SameLine();
         // Save is disabled until there's at least one non-whitespace
         // character in the name — server would reject otherwise.
@@ -1195,7 +1199,9 @@ void draw_cloud_tab() {
             ImGuiInputTextFlags_WordWrap);
         ImGui::PopItemWidth();
         ImGui::Spacing();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::SameLine();
         if (ImGui::Button("Submit report", ImVec2(140, 0))) {
             kick_report(g_browse.report_target_id, g_browse.report_target_name,

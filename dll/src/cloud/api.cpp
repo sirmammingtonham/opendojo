@@ -167,7 +167,9 @@ ListResult list_drills(const ListQuery& q) {
     std::ostringstream url;
     url << opendojo::cloud::rest_url() << "/drill_summaries?";
     url << "select=*";
-    if (!q.character_filter.empty()) { url << "&character=eq." << url_encode(q.character_filter); }
+    if (!q.character_filter.empty()) {
+        url << "&character=eq." << url_encode(q.character_filter);
+    }
     if (!q.search_query.empty()) {
         // PostgREST FTS: ?search_tsv=fts(simple).<term>. Use prefix
         // matching by appending :* so "jin" matches "jin string".
@@ -357,7 +359,9 @@ DeleteResult delete_my_drill(const std::string& drill_id) {
         out.deleted = j[0].get<bool>();
     }
     out.ok = true;
-    if (!out.deleted) { out.error_message = "That drill isn't yours to delete."; }
+    if (!out.deleted) {
+        out.error_message = "That drill isn't yours to delete.";
+    }
     return out;
 }
 
@@ -390,7 +394,9 @@ UpdateResult update_drill(const UpdateArgs& args) {
     // Success body is { "updated": bool } — true if the row was found AND
     // owned by the caller. A non-owner / missing id returns updated=false.
     auto j = json::parse(res.body, nullptr, false);
-    if (j.is_object()) { out.updated = j.value("updated", false); }
+    if (j.is_object()) {
+        out.updated = j.value("updated", false);
+    }
     out.ok = true;
     if (!out.updated && out.error_message.empty()) {
         out.error_message = "Couldn't save your changes. Please try again.";

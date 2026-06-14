@@ -315,7 +315,9 @@ void encode_recording(std::string& out, const Recording& r, std::size_t idx_one_
     std::snprintf(hdr, sizeof(hdr), "name:         %s\n", r.name.c_str());
     out += hdr;
     // Only emit `kind:` for non-live; old files implicitly mean live.
-    if (r.kind != Kind::Live) { out += "kind:         movelist\n"; }
+    if (r.kind != Kind::Live) {
+        out += "kind:         movelist\n";
+    }
 
     if (r.kind == Kind::MoveList) {
         // Movelist entries are just a move ID — no per-frame events.
