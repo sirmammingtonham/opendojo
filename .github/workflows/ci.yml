@@ -66,10 +66,13 @@ jobs:
       - uses: actions/checkout@v4
       # pipx is preinstalled on ubuntu-latest; `pipx run` fetches + runs the
       # pinned clang-format without PATH games. --Werror = fail on any diff.
+      # git ls-files (pathspec '*' recurses subdirs) so headers under
+      # dll/include and sources in cloud/hooks/ui are all covered, and only
+      # tracked files are passed — no stale glob breaking when files move.
       - name: Check formatting
         run: |
-          pipx run 'clang-format==18.1.8' --dry-run --Werror -style=file \
-            dll/src/*.cpp dll/src/*.hpp dll/src/cloud/*.cpp dll/src/cloud/*.hpp
+          git ls-files 'dll/src/*.cpp' 'dll/src/*.hpp' 'dll/include/*.hpp' \
+            | xargs pipx run 'clang-format==18.1.8' --dry-run --Werror -style=file
 
   # ---- Deno edge function ------------------------------------------------
   deno:
