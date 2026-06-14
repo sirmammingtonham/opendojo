@@ -20,6 +20,7 @@ export const MAX_CATEGORIES      = 5;
 // the column-level FK on `difficulty` is the safety net if they drift.
 export const ALLOWED_CATEGORIES = new Set([
     "reaction", "option_select", "fuzzy_guard", "punishment", "throw_break",
+    "other",
 ]);
 export const ALLOWED_DIFFICULTIES = new Set([
     "beginner", "intermediate", "advanced",

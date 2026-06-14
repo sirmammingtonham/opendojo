@@ -36,7 +36,7 @@ struct Category {
 constexpr Category kCategories[] = {
     {"reaction", "Reaction"},       {"option_select", "Option Select"},
     {"fuzzy_guard", "Fuzzy Guard"}, {"punishment", "Punishment"},
-    {"throw_break", "Throw Break"},
+    {"throw_break", "Throw Break"}, {"other", "Other"},
 };
 constexpr int kCategoryCount = static_cast<int>(sizeof(kCategories) / sizeof(kCategories[0]));
 
