@@ -191,21 +191,39 @@ set_target_properties(opendojo PROPERTIES
 
 # ---------------------------------------------------------------------------
 # clang-format: run before each build so the tree stays formatted. Hints
-# cover the VS BuildTools / Community LLVM install paths and a PATH lookup.
-# If clang-format isn't found we skip silently (CI / fresh machines without
-# LLVM still build).
+# cover a standalone LLVM install (preferred) then the VS BuildTools /
+# Community LLVM paths. If clang-format isn't found we skip silently (CI /
+# fresh machines without LLVM still build).
 # ---------------------------------------------------------------------------
+set(OPENDOJO_CLANG_FORMAT_MAJOR 18)  # keep in sync with ci.yml's pinned clang-format
+
 find_program(OPENDOJO_CLANG_FORMAT
     NAMES clang-format
     HINTS
+        "C:/Program Files/LLVM/bin"
         "C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/Llvm/x64/bin"
         "C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/Llvm/bin"
         "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/Llvm/x64/bin"
         "C:/Program Files (x86)/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin"
-        "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin"
-        "C:/Program Files/LLVM/bin")
+        "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin")
 
+set(OPENDOJO_CLANG_FORMAT_OK FALSE)
 if(OPENDOJO_CLANG_FORMAT)
+    execute_process(
+        COMMAND "${OPENDOJO_CLANG_FORMAT}" --version
+        OUTPUT_VARIABLE OPENDOJO_CF_VERSION_RAW
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    # e.g. "clang-format version 18.1.8" -> capture the major.
+    if(OPENDOJO_CF_VERSION_RAW MATCHES "version ([0-9]+)")
+        set(OPENDOJO_CF_FOUND_MAJOR "${CMAKE_MATCH_1}")
+        if(OPENDOJO_CF_FOUND_MAJOR STREQUAL OPENDOJO_CLANG_FORMAT_MAJOR)
+            set(OPENDOJO_CLANG_FORMAT_OK TRUE)
+        endif()
+    endif()
+endif()
+
+if(OPENDOJO_CLANG_FORMAT_OK)
     file(GLOB OPENDOJO_FORMAT_SRCS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/cloud/*.cpp"
@@ -220,7 +238,15 @@ if(OPENDOJO_CLANG_FORMAT)
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "clang-format: formatting dll/src"
         VERBATIM)
-    message(STATUS "OpenDojo: clang-format = ${OPENDOJO_CLANG_FORMAT}")
+    message(STATUS "OpenDojo: clang-format = ${OPENDOJO_CLANG_FORMAT} (v${OPENDOJO_CF_FOUND_MAJOR})")
+elseif(OPENDOJO_CLANG_FORMAT)
+    message(WARNING
+        "OpenDojo: found clang-format at ${OPENDOJO_CLANG_FORMAT} "
+        "(${OPENDOJO_CF_VERSION_RAW}) but major v${OPENDOJO_CLANG_FORMAT_MAJOR} is "
+        "required to match CI. Skipping auto-format to avoid reformatting the tree "
+        "to a different style. Install v${OPENDOJO_CLANG_FORMAT_MAJOR} "
+        "(winget install LLVM.LLVM --version 18.1.8) or set "
+        "-DOPENDOJO_CLANG_FORMAT=<path-to-v${OPENDOJO_CLANG_FORMAT_MAJOR}>.")
 else()
     message(STATUS "OpenDojo: clang-format not found — skipping format step")
 endif()

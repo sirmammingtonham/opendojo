@@ -11,13 +11,15 @@ I just wanted a way to download and load defense drills without needing to re-re
 
 Demo: https://www.youtube.com/watch?v=hpciOVFaxrw
 
+Community drill sharing website: https://opendojo.vercel.app/
+
 ## Features
 
 - **Export** any combination of your 8 practice-mode recording slots to a
   shareable `.drill.txt` text file
 - **Import** drills back into your slots ("Add to empty slots" or
   "Replace all")
-- **OpenDojo Cloud** (in-game): browse drills uploaded by other players,
+- `NEW!` **OpenDojo Cloud** (in-game): browse drills uploaded by other players,
   filter to your CPU character, one-click download. Upload your own drills
   in one click from the Export tab — no signup needed
 - **Autosave per character**: opt in and your last recording is snapshotted
