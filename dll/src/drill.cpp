@@ -406,16 +406,21 @@ Recording make_movelist_recording(std::string name, std::uint32_t move_id) {
     return r;
 }
 
+// Single-line a field: CR/LF would break the line-based text format.
+static std::string one_line(std::string_view s) {
+    std::string out(s);
+    std::replace_if(out.begin(), out.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
+    return out;
+}
+
 std::string encode_text(const Drill& d) {
     std::string out;
     out.reserve(1024 + d.recordings.size() * 256);
 
     char buf[256];
     out += "# OpenDojo drill\n";
-    std::snprintf(buf, sizeof(buf), "name:         %s\n", d.name.c_str());
-    out += buf;
-    std::snprintf(buf, sizeof(buf), "description:  %s\n", d.description.c_str());
-    out += buf;
+    out += "name:         " + one_line(d.name) + "\n";
+    out += "description:  " + one_line(d.description) + "\n";
     std::snprintf(buf, sizeof(buf), "character:    %s\n",
                   d.character.empty() ? "unknown" : d.character.c_str());
     out += buf;
