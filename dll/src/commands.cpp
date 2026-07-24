@@ -18,6 +18,7 @@
 #include "memory.hpp"
 #include "players.hpp"
 #include "slot.hpp"
+#include "slot_labels.hpp"
 #include "subsystems.hpp"
 
 namespace opendojo::commands {
@@ -237,6 +238,7 @@ LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
         for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
             opendojo::slot::set_recorded_flag(i, false);
         }
+        opendojo::slot_labels::clear_all();
         for (std::size_t i = 0; i < d.recordings.size(); ++i) {
             auto s = install(i, d.recordings[i]);
             if (s != opendojo::slot::WriteStatus::Ok) {
@@ -245,6 +247,7 @@ LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
                 r.message = buf;
                 return r;
             }
+            opendojo::slot_labels::set(i, d.recordings[i].name);
         }
         char buf[128];
         std::snprintf(buf, sizeof(buf), "replaced all slots with %zu recordings",
@@ -277,6 +280,7 @@ LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
             r.message = buf;
             return r;
         }
+        opendojo::slot_labels::set(free_slots[i], d.recordings[i].name);
     }
     char buf[160];
     std::snprintf(buf, sizeof(buf), "loaded %zu recordings into free slots", d.recordings.size());

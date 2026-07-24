@@ -27,7 +27,10 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 #include "autosave.hpp"
 #include "config.hpp"
+#include "hooks/player_hook.hpp"
 #include "log.hpp"
+#include "practice_rename.hpp"
+#include "slot_labels.hpp"
 #include "subsystems.hpp"
 #include "ui/menu.hpp"
 #include "ui/theme.hpp"
@@ -987,6 +990,37 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
     // early-returns); the only heavy path (ImGui render) is further
     // gated on the menu being visible.
     const bool in_practice = opendojo::subsystems::in_practice();
+
+    // Detect the not-in-practice -> in-practice edge here (Present runs every
+    // frame, including during a match) and invalidate practice_rename's cached
+    // UObjects, which the engine reloads across a match. Doing this inside
+    // practice_rename::tick() can't work — tick only runs while in practice.
+    static bool s_prev_in_practice = false;
+    if (in_practice && !s_prev_in_practice) {
+        opendojo::practice_rename::on_practice_reentry();
+    } else if (!in_practice && s_prev_in_practice) {
+        opendojo::practice_rename::on_practice_exit();
+    }
+    s_prev_in_practice = in_practice;
+
+    // Drop custom slot labels when the CPU character changes to a *different*
+    // one. Labels are set by load_drill (manual preset load or autoload) and
+    // belong to whatever character was loaded; without this they'd bleed onto
+    // the next character's manually-selected slots when no new drill is loaded.
+    // Compare non-zero ids only: the detour briefly reports id 0 mid-swap, and
+    // a quickmatch return re-detects the SAME id (no change) so its labels are
+    // kept. The next load_drill re-clears+sets, so clearing here is safe.
+    static std::uint32_t s_prev_cpu_id = 0;
+    auto cpu = opendojo::player_hook::current_cpu();
+    if (in_practice && cpu.detected && cpu.cpu_character_id != 0) {
+        if (s_prev_cpu_id != 0 && cpu.cpu_character_id != s_prev_cpu_id) {
+            opendojo::slot_labels::clear_all();
+            OPENDOJO_LOG("render_hook: CPU character %u -> %u — cleared slot labels", s_prev_cpu_id,
+                         cpu.cpu_character_id);
+        }
+        s_prev_cpu_id = cpu.cpu_character_id;
+    }
+
     if (!in_practice) {
         // If the user left practice with the menu open, auto-close so we
         // don't keep drawing it on top of menus/replays.
@@ -1007,6 +1041,9 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
     // menu is visible. See the XInput section comment for the full
     // rationale.
     opendojo::autosave::tick();
+    // Rename the practice-menu "CPU Opponent Action N" rows in place. Cheap
+    // after the first capture (event-driven re-apply via a SetTextID patch).
+    opendojo::practice_rename::tick();
 
     if (!g_menu_visible.load()) {
         return g_present_orig(self, sync_interval, flags);

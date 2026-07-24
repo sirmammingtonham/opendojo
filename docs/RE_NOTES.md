@@ -546,3 +546,23 @@ Practice-mode lifecycle (used by opendojo::practice_state to replace per-tick po
 - Signature: `void* __fastcall ~PracticeController(void* this, unsigned flags)` — standard MSVC scalar-deleting dtor. `flags & 1` triggers operator delete with size 0xD0.
 - Hook at entry to read live gameplay state BEFORE the dtor tears down sub-objects (sub-fields at +0xA0 and +0x98 are released early in the dtor body).
 - The same dtor symbol could in principle be reused for non-singleton instances, so the hook filters: only fire when `this == *(void**)(module+0x9B79290)`.
+
+----
+
+VERSION NOTE — FNamePool RVA moved in v3.01.01.
+
+The FNamePool base is NOT stable across game patches:
+- v3.00.02: module+0x9955480 (the value at the top of this file).
+- v3.01.01: module+0x9962B00.
+
+Everything else about the pool (block-pointer array at pool+0x10, FName.idx encoding, entry header layout, decode logic) is unchanged. Only the base RVA shifted. The reflection-resolution patterns (findUnrealClass / findObjectsOfClass) are version-independent and still match.
+
+FName indices themselves also shift between versions (the registration order changes), so the old self-test values (249832 → "PolarisUMGTextMenu", etc.) are 3.00.02-specific. idx 0 → "None" and idx 999 → "ID" still held on 3.01.01, but don't trust other absolute indices across patches.
+
+Robust runtime resolution (used by dll/src/practice_rename.cpp instead of a hardcoded constant):
+1. Try a hint RVA. Validate it: blocks[0] (qword at pool+0x10) must point to FName idx 0 = "None" — i.e. a non-wide FNameEntry, header `(len<<6)` with len==4, followed by the 4 ASCII bytes `4E 6F 6E 65`.
+2. On mismatch, scan the .data window (~module+0x9400000..+0x9F20000) for a qword that points to such a "None" block-start; the pool base is that qword's address minus 0x10.
+
+This self-check + scan makes FName decoding survive future base-RVA moves. Found via CE: `AOBScan` for a pool candidate then decode idx 999 == "ID" to confirm.
+
+The GryphonLocalization text API lives in module /Script/GryphonLocalization (NOT /Script/Polaris): UGryphonFunctionLibrary::GetString(FString TextID) -> FString resolves a Gryphon text-id to its display string. Call on the class CDO via ProcessEvent. Practice option rows store their text-id as the list_item.Text FString (e.g. "TEXT_000_UI_PRACTICE_001"); the right-pane option rows (incl. "CPU Opponent Action N") are WBP_UI_PracticeMenu_Button_2_C (Button_1 is the left settings list).
