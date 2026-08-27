@@ -26,9 +26,16 @@ namespace {
 constexpr const char* PAT_PLAYERS = "4C 89 35 ?? ?? ?? ?? 41 88 5E 28";
 
 // Code site that loads the main_player_info pointer-of-pointers from a
-// global slot. disp32 at offset +9 is the RIP-relative address of that slot.
+// global slot. disp32 at offset +3 is the RIP-relative address of that slot.
+//
+// Irony's version led with the prologue `40 53 48 83 EC 20`, which the
+// 2026-08-20 patch inlined away. The body survived, so anchor on that —
+// function boundaries move on a relink, the instructions inside don't. Two
+// sites match the body and both decode to the same global; the trailing
+// `48 8B CB E8 ...` only pins a unique hit.
 constexpr const char* PAT_MAIN_INFO =
-    "40 53 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 85 DB 74 ?? BA 01 00 00 00";
+    "48 8B 1D ?? ?? ?? ?? 48 85 DB 74 ?? BA 01 00 00 00 "
+    "48 8B CB E8 ?? ?? ?? ?? 48 85 C0 74 ?? B2 01";
 
 // Player struct field offsets (T8 v3.00.02).
 constexpr std::ptrdiff_t OFF_CHARACTER_ID = 0x168;  // u32
@@ -194,7 +201,7 @@ void do_resolve() {
     }
 
     g_resolved.holder_global_slot = rip_relative(hit_players + 3);
-    g_resolved.info_global_slot = rip_relative(hit_info + 9);
+    g_resolved.info_global_slot = rip_relative(hit_info + 3);
     g_resolved.ok = true;
     OPENDOJO_LOG("players: resolved holder@0x%llX info@0x%llX",
                  static_cast<unsigned long long>(g_resolved.holder_global_slot),
