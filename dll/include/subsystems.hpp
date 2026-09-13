@@ -19,10 +19,11 @@ namespace opendojo::subsystems {
 // Service-locator context pointer offset in Polaris's image. Fallback
 // only: lookup() prefers signatures::ctx_ptr_addr(), which resolves CTX
 // AOB-from-xref via the get_ctx anchor (GET_CTX_SIG in signatures.cpp).
-// Refreshed for the 2026-08-20 Bob patch (was 0x9537300 on v3.01.01);
-// the AOB found it either way, this just keeps the fallback one patch
-// fresh instead of two.
-inline constexpr std::uintptr_t CTX_PTR_OFFSET = 0x954D300;
+// Refreshed for the 2026-09-10 patch (was 0x954D300 for the 2026-08-20
+// Bob patch, 0x9537300 on v3.01.01). Verified against the AOB-resolved
+// address in a live 2026-09-10 session; the AOB found it either way,
+// this just keeps the fallback from rotting a patch behind.
+inline constexpr std::uintptr_t CTX_PTR_OFFSET = 0x954C300;
 
 // Subsystem hash keys. These were previously offsets into .data that held
 // the actual hash; now we use the hash values directly so we don't depend

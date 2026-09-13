@@ -44,11 +44,19 @@ inline constexpr std::uint32_t FLAG_LIVE = 2u;
 // Move-list payload storage. All 8 movelist slots share a single
 // uint32[8] array stored at:
 //   recordpool[cpu_side].obj + 0x44 + slot*4
-// where recordpool = lookup(KEY_RECORDPOOL), each element is 0x140 bytes,
+// where recordpool = lookup(KEY_RECORDPOOL), each element is 0x148 bytes,
 // cpu_side = gameplay[+0x47C] XOR 1. The dispatcher FUN_145f24060 writes
 // the move ID via FUN_14191f220 (verified via flag dump). A move ID of
 // 0xFFFFFFFF means "no movelist set" (the cleared sentinel).
-inline constexpr std::uintptr_t RECORDPOOL_OBJ_STRIDE = 0x140;
+//
+// The stride was 0x140 up to and including the 2026-08-20 Bob patch; the
+// 2026-09-10 patch grew the element by 8 bytes. Confirmed live: the
+// begin..end span is an exact multiple of 0x148 (0x3D8 = 3 * 0x148) and
+// not of 0x140, and only the 0x148 walk puts the written move ID in the
+// slot it was written to. A wrong stride does NOT fail the n_elem bound
+// check — it silently shifts the read by 8 bytes per cpu_side, so side 0
+// stays correct while side 1 reads two slots off.
+inline constexpr std::uintptr_t RECORDPOOL_OBJ_STRIDE = 0x148;
 inline constexpr std::uintptr_t RECORDPOOL_MOVE_ID_BASE = 0x44;  // obj + 0x44 + slot*4
 inline constexpr std::uint32_t MOVE_ID_NONE = 0xFFFFFFFFu;
 
