@@ -546,3 +546,37 @@ Practice-mode lifecycle (used by opendojo::practice_state to replace per-tick po
 - Signature: `void* __fastcall ~PracticeController(void* this, unsigned flags)` — standard MSVC scalar-deleting dtor. `flags & 1` triggers operator delete with size 0xD0.
 - Hook at entry to read live gameplay state BEFORE the dtor tears down sub-objects (sub-fields at +0xA0 and +0x98 are released early in the dtor body).
 - The same dtor symbol could in principle be reused for non-singleton instances, so the hook filters: only fire when `this == *(void**)(module+0x9B79290)`.
+
+----
+
+## 2026-08-20 patch (the Bob release)
+
+Build identity: the exe has no version resource (`FileVersionRaw` reads
+`1.0.0.0`) and no `x.yy.zz` string, so use the Steam buildid `24827309`
+(`steamapps/appmanifest_1778820.acf`).
+
+Only one thing broke: `players.cpp::PAT_MAIN_INFO`. The tell is
+`players: pattern miss (players=<nonzero> info=0x0)` — the two patterns are
+scanned separately, so a nonzero `players` with `info=0x0` names the casualty.
+
+Cause: the pattern (from Irony) led with the prologue `40 53 48 83 EC 20`, and
+this patch stopped emitting that body as its own function. Both surviving copies
+now sit mid-function (RVA 0x5C2FF94 after an epilogue, 0x5C5DDC4 after a call)
+with the body bytes unchanged. Fix is to anchor on the body; disp32 +9 -> +3:
+
+```
+48 8B 1D ?? ?? ?? ?? 48 85 DB 74 ?? BA 01 00 00 00 48 8B CB E8 ?? ?? ?? ?? 48 85 C0 74 ?? B2 01
+```
+
+Both body sites decode to the same global, so the tail only pins uniqueness.
+General rule: anchor on a function's body, not its prologue — prologues die to
+inlining and object-file reordering, bodies only die when the code changes.
+
+Values: `PAT_MAIN_INFO` global `0x9B8DB70`. Holder global (`PAT_PLAYERS`,
+pattern unchanged) `0x9B91BC0` — independently matches tekken-fashion-hub's
+`PLAYERMGR_GLOBAL_RVA_FALLBACK`. `CTX_PTR_OFFSET` fallback `0x9537300` ->
+`0x954D300` (the AOB resolved CTX either way).
+
+Scanning caveat: re-derive from the exe ON DISK, not from live memory — MinHook
+overwrites the prologue of anything already detoured, so a live scan misses
+exactly the functions we hook.
