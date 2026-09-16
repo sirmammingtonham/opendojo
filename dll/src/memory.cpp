@@ -104,6 +104,9 @@ bool opendojo::memory::try_read_u64(std::uintptr_t addr, std::uint64_t* out) {
 bool opendojo::memory::try_read_u32(std::uintptr_t addr, std::uint32_t* out) {
     return try_read_at(addr, out);
 }
+bool opendojo::memory::try_read_u16(std::uintptr_t addr, std::uint16_t* out) {
+    return try_read_at(addr, out);
+}
 bool opendojo::memory::try_read_u8(std::uintptr_t addr, std::uint8_t* out) {
     return try_read_at(addr, out);
 }

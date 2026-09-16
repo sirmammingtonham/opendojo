@@ -126,41 +126,6 @@ std::uintptr_t rip_relative(std::uintptr_t at) {
     return at + 4 + static_cast<std::uintptr_t>(static_cast<std::int64_t>(disp));
 }
 
-// ----- SEH-protected reads --------------------------------------------------
-
-bool seh_read_u64(std::uintptr_t addr, std::uint64_t* out) {
-    __try {
-        std::memcpy(out, reinterpret_cast<const void*>(addr), 8);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-bool seh_read_u32(std::uintptr_t addr, std::uint32_t* out) {
-    __try {
-        std::memcpy(out, reinterpret_cast<const void*>(addr), 4);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-bool seh_read_u16(std::uintptr_t addr, std::uint16_t* out) {
-    __try {
-        std::memcpy(out, reinterpret_cast<const void*>(addr), 2);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-bool seh_read_u8(std::uintptr_t addr, std::uint8_t* out) {
-    __try {
-        std::memcpy(out, reinterpret_cast<const void*>(addr), 1);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
 // ----- UE5 reflection primitives --------------------------------------------
 
 constexpr const char* PAT_FIND_UNREAL_CLASS = "45 33 C0 49 8B CF E8 ?? ?? ?? ?? 48 8B 4C 24 60";
@@ -200,9 +165,11 @@ constexpr std::uint32_t RF_CLASS_DEFAULT_OBJECT = 0x10;
 constexpr std::uint32_t RF_ARCHETYPE_OBJECT = 0x20;
 
 // FNamePool. The base RVA moves between game patches (0x9955480 on v3.00.02,
-// 0x9962B00 on v3.01.01), so we resolve it at runtime with a self-check
-// rather than trusting a constant — see resolve_name_pool().
-constexpr std::uintptr_t FNAME_POOL_RVA_HINT = 0x9962B00;
+// 0x9962B00 on v3.01.01, 0x996B700 on the 2026-09-10 patch), so we resolve it
+// at runtime with a self-check rather than trusting a constant — see
+// resolve_name_pool(). The hint only saves the ~11MB .data scan; a stale hint
+// costs startup time on first rename, not correctness.
+constexpr std::uintptr_t FNAME_POOL_RVA_HINT = 0x996B700;
 constexpr std::ptrdiff_t POOL_BLOCKS_OFFSET = 0x10;
 constexpr std::uint32_t FNAME_BLOCK_MASK = 0x1FFF;
 constexpr std::uint32_t FNAME_STRIDE_MASK = 0xFFFF;
@@ -215,13 +182,13 @@ std::uintptr_t g_name_pool = 0;
 // (FNameEntry: u16 header {wide:1, hash:5, len:10}, then chars).
 bool block0_is_none(std::uintptr_t pool) {
     std::uint64_t b0 = 0;
-    if (!seh_read_u64(pool + POOL_BLOCKS_OFFSET, &b0) || !b0) return false;
+    if (!memory::try_read_u64(pool + POOL_BLOCKS_OFFSET, &b0) || !b0) return false;
     std::uint16_t hdr = 0;
-    if (!seh_read_u16(static_cast<std::uintptr_t>(b0), &hdr)) return false;
+    if (!memory::try_read_u16(static_cast<std::uintptr_t>(b0), &hdr)) return false;
     if ((hdr & 1) != 0) return false;   // not wide
     if ((hdr >> 6) != 4) return false;  // len == 4
     std::uint32_t chars = 0;
-    if (!seh_read_u32(static_cast<std::uintptr_t>(b0) + 2, &chars)) return false;
+    if (!memory::try_read_u32(static_cast<std::uintptr_t>(b0) + 2, &chars)) return false;
     return chars == 0x656E6F4E;  // "None" little-endian
 }
 
@@ -241,13 +208,14 @@ void resolve_name_pool() {
     // Scan a generous .data window for blocks[0] -> "None" block start.
     for (std::uintptr_t a = base + 0x9400000; a < base + 0x9F20000; a += 8) {
         std::uint64_t q = 0;
-        if (!seh_read_u64(a, &q)) continue;
+        if (!memory::try_read_u64(a, &q)) continue;
         if (q <= 0x10000 || q >= 0x7FFFFFFFFFFFull) continue;
         std::uint16_t hdr = 0;
-        if (!seh_read_u16(static_cast<std::uintptr_t>(q), &hdr)) continue;
+        if (!memory::try_read_u16(static_cast<std::uintptr_t>(q), &hdr)) continue;
         if ((hdr & 1) != 0 || (hdr >> 6) != 4) continue;
         std::uint32_t chars = 0;
-        if (!seh_read_u32(static_cast<std::uintptr_t>(q) + 2, &chars) || chars != 0x656E6F4E)
+        if (!memory::try_read_u32(static_cast<std::uintptr_t>(q) + 2, &chars) ||
+            chars != 0x656E6F4E)
             continue;
         if (block0_is_none(a - POOL_BLOCKS_OFFSET)) {
             g_name_pool = a - POOL_BLOCKS_OFFSET;
@@ -271,11 +239,11 @@ bool decode_fname(std::uint32_t idx, char* out_buf, std::size_t out_buf_size) {
     auto block_idx = (idx >> FNAME_BLOCK_SHIFT) & FNAME_BLOCK_MASK;
     auto stride = idx & FNAME_STRIDE_MASK;
     std::uint64_t block_ptr = 0;
-    if (!seh_read_u64(pool + POOL_BLOCKS_OFFSET + block_idx * 8, &block_ptr) || !block_ptr)
+    if (!memory::try_read_u64(pool + POOL_BLOCKS_OFFSET + block_idx * 8, &block_ptr) || !block_ptr)
         return false;
     auto entry = static_cast<std::uintptr_t>(block_ptr) + static_cast<std::uintptr_t>(stride) * 2;
     std::uint16_t header = 0;
-    if (!seh_read_u16(entry, &header)) return false;
+    if (!memory::try_read_u16(entry, &header)) return false;
     bool is_wide = (header & 1) != 0;
     std::uint32_t len = header >> 6;
     if (len == 0 || len > 1023) return false;
@@ -283,11 +251,11 @@ bool decode_fname(std::uint32_t idx, char* out_buf, std::size_t out_buf_size) {
     for (i = 0; i < len && i + 1 < out_buf_size; ++i) {
         if (is_wide) {
             std::uint16_t w = 0;
-            if (!seh_read_u16(entry + 2 + i * 2, &w)) break;
+            if (!memory::try_read_u16(entry + 2 + i * 2, &w)) break;
             out_buf[i] = (w > 0x7F) ? '?' : static_cast<char>(w);
         } else {
             std::uint8_t b = 0;
-            if (!seh_read_u8(entry + 2 + i, &b)) break;
+            if (!memory::try_read_u8(entry + 2 + i, &b)) break;
             out_buf[i] = (b > 0x7F) ? '?' : static_cast<char>(b);
         }
     }
@@ -300,23 +268,23 @@ void* find_ufunction_by_name(void* uclass, const char* target) {
     auto cls = reinterpret_cast<std::uintptr_t>(uclass);
     for (int depth = 0; depth < 16 && cls; ++depth) {
         std::uint64_t child = 0;
-        if (seh_read_u64(cls + USTRUCT_CHILDREN_OFF, &child) && child) {
+        if (memory::try_read_u64(cls + USTRUCT_CHILDREN_OFF, &child) && child) {
             auto fn = static_cast<std::uintptr_t>(child);
             int hops = 0;
             char buf[256];
             while (fn && hops++ < 512) {
                 std::uint32_t name_idx = 0;
-                if (!seh_read_u32(fn + UOBJECT_NAME_OFF, &name_idx)) break;
+                if (!memory::try_read_u32(fn + UOBJECT_NAME_OFF, &name_idx)) break;
                 if (decode_fname(name_idx, buf, sizeof(buf)) && std::strcmp(buf, target) == 0) {
                     return reinterpret_cast<void*>(fn);
                 }
                 std::uint64_t nxt = 0;
-                if (!seh_read_u64(fn + UFIELD_NEXT_OFF, &nxt)) break;
+                if (!memory::try_read_u64(fn + UFIELD_NEXT_OFF, &nxt)) break;
                 fn = static_cast<std::uintptr_t>(nxt);
             }
         }
         std::uint64_t super = 0;
-        if (!seh_read_u64(cls + USTRUCT_SUPER_OFF, &super)) break;
+        if (!memory::try_read_u64(cls + USTRUCT_SUPER_OFF, &super)) break;
         cls = static_cast<std::uintptr_t>(super);
     }
     return nullptr;
@@ -329,12 +297,12 @@ std::uintptr_t walk_field_chain_for_name(std::uintptr_t head, std::ptrdiff_t nex
     char buf[256];
     while (f && hops++ < 2048) {
         std::uint32_t name_idx = 0;
-        if (!seh_read_u32(f + FFIELD_NAME_OFF, &name_idx)) break;
+        if (!memory::try_read_u32(f + FFIELD_NAME_OFF, &name_idx)) break;
         if (decode_fname(name_idx, buf, sizeof(buf)) && std::strcmp(buf, target) == 0) {
             return f;
         }
         std::uint64_t nxt = 0;
-        if (!seh_read_u64(f + next_off, &nxt)) break;
+        if (!memory::try_read_u64(f + next_off, &nxt)) break;
         f = static_cast<std::uintptr_t>(nxt);
     }
     return 0;
@@ -345,28 +313,28 @@ std::int32_t find_fproperty_offset(void* uclass, const char* target) {
     auto cls = reinterpret_cast<std::uintptr_t>(uclass);
     for (int depth = 0; depth < 16 && cls; ++depth) {
         std::uint64_t head = 0;
-        if (seh_read_u64(cls + USTRUCT_CHILDPROPS_OFF, &head) && head) {
+        if (memory::try_read_u64(cls + USTRUCT_CHILDPROPS_OFF, &head) && head) {
             auto hit = walk_field_chain_for_name(static_cast<std::uintptr_t>(head), FFIELD_NEXT_OFF,
                                                  target);
             if (hit) {
                 std::uint32_t off = 0;
-                if (seh_read_u32(hit + FPROPERTY_OFFSET_INT_OFF, &off)) {
+                if (memory::try_read_u32(hit + FPROPERTY_OFFSET_INT_OFF, &off)) {
                     return static_cast<std::int32_t>(off);
                 }
             }
         }
         std::uint64_t super = 0;
-        if (!seh_read_u64(cls + USTRUCT_SUPER_OFF, &super)) break;
+        if (!memory::try_read_u64(cls + USTRUCT_SUPER_OFF, &super)) break;
         cls = static_cast<std::uintptr_t>(super);
     }
     cls = reinterpret_cast<std::uintptr_t>(uclass);
     std::uint64_t plink = 0;
-    if (seh_read_u64(cls + USTRUCT_PROPERTY_LINK_OFF, &plink) && plink) {
+    if (memory::try_read_u64(cls + USTRUCT_PROPERTY_LINK_OFF, &plink) && plink) {
         auto hit = walk_field_chain_for_name(static_cast<std::uintptr_t>(plink),
                                              FPROPERTY_PROPLINK_NEXT_OFF, target);
         if (hit) {
             std::uint32_t off = 0;
-            if (seh_read_u32(hit + FPROPERTY_OFFSET_INT_OFF, &off)) {
+            if (memory::try_read_u32(hit + FPROPERTY_OFFSET_INT_OFF, &off)) {
                 return static_cast<std::int32_t>(off);
             }
         }
@@ -398,11 +366,12 @@ void* find_class_by_name(FindObjectsOfClassFn fo, void* base_cls, const char* ta
     char name_buf[128];
     for (std::int32_t i = 0; i < results.num; ++i) {
         std::uint64_t obj = 0;
-        if (!seh_read_u64(reinterpret_cast<std::uintptr_t>(&arr[i]), &obj) || !obj) continue;
+        if (!memory::try_read_u64(reinterpret_cast<std::uintptr_t>(&arr[i]), &obj) || !obj)
+            continue;
         std::uint64_t cls = 0;
-        if (!seh_read_u64(obj + UOBJECT_CLASS_OFF, &cls) || !cls) continue;
+        if (!memory::try_read_u64(obj + UOBJECT_CLASS_OFF, &cls) || !cls) continue;
         std::uint32_t cls_idx = 0;
-        if (!seh_read_u32(cls + UOBJECT_NAME_OFF, &cls_idx)) continue;
+        if (!memory::try_read_u32(cls + UOBJECT_NAME_OFF, &cls_idx)) continue;
         if (!decode_fname(cls_idx, name_buf, sizeof(name_buf))) continue;
         if (std::strncmp(name_buf, target_name, target_len) == 0 && name_buf[target_len] == '\0') {
             return reinterpret_cast<void*>(cls);
@@ -423,7 +392,8 @@ std::vector<void*> find_all_live_objects_of_class(FindObjectsOfClassFn fn, void*
     out.reserve(results.num);
     for (std::int32_t i = 0; i < results.num; ++i) {
         std::uint64_t obj = 0;
-        if (!seh_read_u64(reinterpret_cast<std::uintptr_t>(&arr[i]), &obj) || !obj) continue;
+        if (!memory::try_read_u64(reinterpret_cast<std::uintptr_t>(&arr[i]), &obj) || !obj)
+            continue;
         out.push_back(reinterpret_cast<void*>(obj));
     }
     return out;
@@ -441,9 +411,11 @@ void* find_cdo(FindObjectsOfClassFn fn, void* cls) {
     auto* arr = reinterpret_cast<std::uint64_t*>(results.data);
     for (std::int32_t i = 0; i < results.num; ++i) {
         std::uint64_t obj = 0;
-        if (!seh_read_u64(reinterpret_cast<std::uintptr_t>(&arr[i]), &obj) || !obj) continue;
+        if (!memory::try_read_u64(reinterpret_cast<std::uintptr_t>(&arr[i]), &obj) || !obj)
+            continue;
         std::uint32_t flags = 0;
-        if (!seh_read_u32(static_cast<std::uintptr_t>(obj) + UOBJECT_FLAGS_OFF, &flags)) continue;
+        if (!memory::try_read_u32(static_cast<std::uintptr_t>(obj) + UOBJECT_FLAGS_OFF, &flags))
+            continue;
         if (flags & RF_CLASS_DEFAULT_OBJECT) return reinterpret_cast<void*>(obj);
     }
     return nullptr;
@@ -471,7 +443,10 @@ std::wstring utf8_to_wide(const std::string& s) {
     return w;
 }
 
-void make_fstring_leaky(UE_FString& out, const wchar_t* text) {
+// Fill a UE_FString parm from `text`. ProcessEvent memcpy's the parm block
+// into its own frame and the callee copies the FString from there, so the
+// buffer stays ours: free it with free_fstring() after the call returns.
+void make_fstring(UE_FString& out, const wchar_t* text) {
     if (!text) text = L"";
     std::size_t n = std::wcslen(text) + 1;
     auto* buf = static_cast<wchar_t*>(std::malloc(n * sizeof(wchar_t)));
@@ -485,6 +460,11 @@ void make_fstring_leaky(UE_FString& out, const wchar_t* text) {
     out.max = static_cast<std::int32_t>(n);
 }
 
+void free_fstring(UE_FString& s) {
+    std::free(s.data);
+    s = {};
+}
+
 // Read an FString { wchar_t* data; int32 num; } at `addr` into an ASCII
 // buffer (non-ASCII chars become '?'). Returns the character count, or -1
 // on failure. `num` includes the trailing NUL.
@@ -493,13 +473,13 @@ std::int32_t read_fstring_ascii(std::uintptr_t addr, char* out, std::size_t cap)
     out[0] = '\0';
     std::uint64_t data = 0;
     std::uint32_t num = 0;
-    if (!seh_read_u64(addr, &data) || !data) return -1;
-    if (!seh_read_u32(addr + 8, &num) || num <= 0) return -1;
+    if (!memory::try_read_u64(addr, &data) || !data) return -1;
+    if (!memory::try_read_u32(addr + 8, &num) || num <= 0) return -1;
     std::size_t chars = static_cast<std::size_t>(num) - 1;  // drop NUL
     std::size_t i;
     for (i = 0; i < chars && i + 1 < cap; ++i) {
         std::uint16_t ch = 0;
-        if (!seh_read_u16(static_cast<std::uintptr_t>(data) + i * 2, &ch)) break;
+        if (!memory::try_read_u16(static_cast<std::uintptr_t>(data) + i * 2, &ch)) break;
         out[i] = (ch > 0x7F) ? '?' : static_cast<char>(ch);
     }
     out[i] = '\0';
@@ -634,11 +614,14 @@ void try_resolve_bp_classes() {
         auto rows = find_all_live_objects_of_class(g_r.find_objects_of_class, g_r.cls_button_row);
         for (auto* row : rows) {
             std::uint64_t item = 0;
-            if (!seh_read_u64(reinterpret_cast<std::uintptr_t>(row) + g_r.off_list_item, &item) ||
+            if (!memory::try_read_u64(reinterpret_cast<std::uintptr_t>(row) + g_r.off_list_item,
+                                      &item) ||
                 !item)
                 continue;
             std::uint64_t cls = 0;
-            if (!seh_read_u64(static_cast<std::uintptr_t>(item) + UOBJECT_CLASS_OFF, &cls) || !cls)
+            if (!memory::try_read_u64(static_cast<std::uintptr_t>(item) + UOBJECT_CLASS_OFF,
+                                      &cls) ||
+                !cls)
                 continue;
             g_r.off_item_text = find_fproperty_offset(reinterpret_cast<void*>(cls), "Text");
             if (g_r.off_item_text >= 0)
@@ -683,7 +666,7 @@ void call_set_raw_text(void* tb, const wchar_t* text) {
         bool ReplaceUnsupportedChar;
         std::uint8_t _pad[7];
     } parms{};
-    make_fstring_leaky(parms.RawText, text);
+    make_fstring(parms.RawText, text);
     parms.ReplaceUnsupportedChar = false;
     __try {
         pe_from_self(tb)(tb, g_r.ufn_set_raw_text, &parms);
@@ -691,6 +674,7 @@ void call_set_raw_text(void* tb, const wchar_t* text) {
         static std::atomic<int> n{0};
         if (n.fetch_add(1) < 3) OPENDOJO_LOG("practice_rename: SEH in SetRawText(tb=0x%p)", tb);
     }
+    free_fstring(parms.RawText);
 }
 
 // Resolve a Gryphon text-id to its display string via
@@ -698,18 +682,25 @@ void call_set_raw_text(void* tb, const wchar_t* text) {
 // ASCII result into `out`; returns char count or -1 on failure.
 std::int32_t call_get_string(const wchar_t* text_id, char* out, std::size_t cap) {
     if (!g_r.gryphon_cdo || !g_r.ufn_get_string) return -1;
-    struct {
+    // The native thunk assigns into ReturnValue (`*Result = GetString(...)`),
+    // and FString assignment frees the buffer already in the slot. Keeping the
+    // slot static means each call frees the previous game-allocated result,
+    // which we couldn't free ourselves (no FMemory::Free). Game thread only.
+    static struct {
         UE_FString TextID;
         UE_FString ReturnValue;
     } parms{};
-    make_fstring_leaky(parms.TextID, text_id);
+    make_fstring(parms.TextID, text_id);
+    bool ok = true;
     __try {
         pe_from_self(g_r.gryphon_cdo)(g_r.gryphon_cdo, g_r.ufn_get_string, &parms);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         static std::atomic<int> n{0};
         if (n.fetch_add(1) < 3) OPENDOJO_LOG("practice_rename: SEH in GetString");
-        return -1;
+        ok = false;
     }
+    free_fstring(parms.TextID);
+    if (!ok) return -1;
     return read_fstring_ascii(reinterpret_cast<std::uintptr_t>(&parms.ReturnValue), out, cap);
 }
 
@@ -755,7 +746,7 @@ bool install_set_text_id_hook() {
     if (!g_r.ufn_set_text_id) return false;
     auto func_slot = reinterpret_cast<std::uintptr_t>(g_r.ufn_set_text_id) + UFUNCTION_FUNC_OFF;
     std::uint64_t orig = 0;
-    if (!seh_read_u64(func_slot, &orig) || !orig) {
+    if (!memory::try_read_u64(func_slot, &orig) || !orig) {
         OPENDOJO_LOG("practice_rename: SetTextID Func slot unreadable");
         return false;
     }
@@ -809,7 +800,7 @@ void scan_and_apply_rows() {
     for (auto* row : rows) {
         auto raddr = reinterpret_cast<std::uintptr_t>(row);
         std::uint64_t item = 0;
-        if (!seh_read_u64(raddr + g_r.off_list_item, &item) || !item) continue;
+        if (!memory::try_read_u64(raddr + g_r.off_list_item, &item) || !item) continue;
 
         // item.Text holds the Gryphon text-id (FString); resolve it.
         if (read_fstring_ascii(static_cast<std::uintptr_t>(item) + g_r.off_item_text, id_buf,
@@ -845,8 +836,8 @@ void scan_and_apply_rows() {
         if (repl.empty()) continue;
 
         std::uint64_t tb_off = 0, tb_on = 0;
-        seh_read_u64(raddr + g_r.off_tb_menu_off, &tb_off);
-        seh_read_u64(raddr + g_r.off_tb_menu_on, &tb_on);
+        memory::try_read_u64(raddr + g_r.off_tb_menu_off, &tb_off);
+        memory::try_read_u64(raddr + g_r.off_tb_menu_on, &tb_on);
         if (tb_off) fresh.push_back({reinterpret_cast<void*>(tb_off), repl});
         if (tb_on) fresh.push_back({reinterpret_cast<void*>(tb_on), repl});
     }
