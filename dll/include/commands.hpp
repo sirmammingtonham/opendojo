@@ -6,6 +6,8 @@
 #include <string_view>
 #include <vector>
 
+#include "drill.hpp"
+
 // Top-level OpenDojo operations. The menu is the primary consumer.
 //
 // All filesystem state lives under <game>\Polaris\Binaries\Win64\opendojo\.
@@ -79,6 +81,19 @@ struct ExportResult {
     std::filesystem::path path;  // saved path (empty on failure)
     std::string message;
 };
+
+// Append every currently-occupied slot to `d.recordings`, in slot order.
+// Returns the number appended.
+//
+// Each recording's name comes from slot_labels — the same store the
+// practice-menu rename reads — so whatever the player typed in the
+// Recordings tab is what lands in the file, and what the menu rows show
+// again after the drill is re-imported. An unnamed slot falls back to the
+// positional "slot N".
+//
+// Shared by the local-save, cloud-upload and autosave capture paths so all
+// three emit an identical recording set.
+std::size_t capture_populated_slots(opendojo::drill::Drill& d);
 
 // Snapshot every currently-occupied slot (event_count > 0) into one drill
 // file. `drill_name` becomes both the `name:` field and the basis for the

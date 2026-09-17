@@ -20,6 +20,7 @@
 #include "players.hpp"
 #include "hooks/render_hook.hpp"
 #include "slot.hpp"
+#include "slot_labels.hpp"
 #include "subsystems.hpp"
 #include "ui/theme.hpp"
 
@@ -29,7 +30,7 @@ namespace opendojo::menu {
 
 namespace {
 
-constexpr const char* OPENDOJO_VERSION = "v0.5";
+constexpr const char* OPENDOJO_VERSION = "v0.6";
 
 using clock = std::chrono::steady_clock;
 
@@ -58,6 +59,18 @@ struct State {
         Newest,
     };
     Sort sort_mode = Sort::Name;
+
+    // Per-slot recording names, edited in the Recordings table. Pushed
+    // straight into slot_labels on every keystroke, so the practice-menu
+    // row renames live and the export picks the name up with no further
+    // plumbing.
+    //
+    // `slot_label_mirror` holds the last value we pushed. When slot_labels
+    // differs from it, something else changed the label behind our back —
+    // a drill load, or the CPU-character-change clear in render_hook — and
+    // the edit box is refreshed from the store instead of overwriting it.
+    char export_slot_names[opendojo::slot::USER_SLOTS][64] = {};
+    char slot_label_mirror[opendojo::slot::USER_SLOTS][64] = {};
 
     // Export form buffers.
     char export_name[96] = "";
@@ -549,10 +562,11 @@ void draw_recordings_tab() {
     } else {
         const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                       ImGuiTableFlags_SizingStretchProp;
-        if (ImGui::BeginTable("recordings", 3, flags)) {
-            ImGui::TableSetupColumn("Recording", ImGuiTableColumnFlags_WidthFixed, 140.0f);
-            ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 120.0f);
-            ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthStretch);
+        if (ImGui::BeginTable("recordings", 4, flags)) {
+            ImGui::TableSetupColumn("Recording", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+            ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthFixed, 90.0f);
             ImGui::TableHeadersRow();
 
             for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
@@ -561,9 +575,37 @@ void draw_recordings_tab() {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 ImGui::Text("Recording %zu", i + 1);
+
                 ImGui::TableSetColumnIndex(1);
-                ImGui::TextUnformatted(opendojo::slot::kind_name(k));
+                // Refresh the box if the label store changed underneath us
+                // (drill load, or the character-change clear). Comparing
+                // against the mirror rather than against the box means a
+                // name the user is mid-way through typing is never clobbered.
+                auto live = opendojo::slot_labels::get(i);
+                if (live != g_state.slot_label_mirror[i]) {
+                    std::snprintf(g_state.export_slot_names[i],
+                                  sizeof(g_state.export_slot_names[i]), "%s", live.c_str());
+                    std::snprintf(g_state.slot_label_mirror[i],
+                                  sizeof(g_state.slot_label_mirror[i]), "%s", live.c_str());
+                }
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                if (ImGui::InputTextWithHint("##slot_name", "unnamed", g_state.export_slot_names[i],
+                                             sizeof(g_state.export_slot_names[i]))) {
+                    // Apply on every keystroke. practice_rename polls
+                    // slot_labels, so the in-game row follows within one
+                    // scan (~0.5 s).
+                    opendojo::slot_labels::set(i, g_state.export_slot_names[i]);
+                    std::snprintf(g_state.slot_label_mirror[i],
+                                  sizeof(g_state.slot_label_mirror[i]), "%s",
+                                  g_state.export_slot_names[i]);
+                }
+                nav_recenter();
+                ImGui::PopID();
+
                 ImGui::TableSetColumnIndex(2);
+                ImGui::TextUnformatted(opendojo::slot::kind_name(k));
+                ImGui::TableSetColumnIndex(3);
                 if (k == opendojo::slot::Kind::MoveList) {
                     ImGui::TextUnformatted("saved");
                 } else {
@@ -572,6 +614,9 @@ void draw_recordings_tab() {
             }
             ImGui::EndTable();
         }
+        ImGui::TextDisabled(
+            "Name a recording to relabel its row in the game's practice menu. "
+            "Names are saved into the drill file.");
     }
 
     ImGui::Spacing();

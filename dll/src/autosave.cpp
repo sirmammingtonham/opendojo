@@ -180,19 +180,10 @@ bool save_for(std::string_view character) {
         "character changes or you leave practice with this character.";
     d.character = std::string(character);
 
-    for (std::size_t i = 0; i < slot::USER_SLOTS; ++i) {
-        auto slot_kind = slot::kind(i);
-        if (slot_kind == slot::Kind::Empty) continue;
-        char rn[32];
-        std::snprintf(rn, sizeof(rn), "slot %zu", i + 1);
-        if (slot_kind == slot::Kind::MoveList) {
-            d.recordings.push_back(drill::make_movelist_recording(rn, slot::movelist_move_id(i)));
-        } else {
-            std::uint8_t buf[slot::SLOT_PITCH];
-            if (!slot::read(i, buf)) continue;
-            d.recordings.push_back(drill::make_live_recording(rn, buf));
-        }
-    }
+    // Same capture path as a manual export, so an autosave preserves the
+    // names the player typed. Restoring an autosave therefore restores the
+    // practice-menu labels too.
+    commands::capture_populated_slots(d);
     if (d.recordings.empty()) return true;
 
     std::error_code ec;

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "log.hpp"
@@ -24,9 +25,11 @@
 //   - Resolve the UE5 reflection helpers (FindObject<UClass>, GetObjectsOfClass)
 //     by pattern, then UPolarisTextBlock + its SetRawText / SetTextID
 //     UFunctions and the practice row class' relevant FProperty offsets.
-//   - Each (rate-limited) tick: walk live WBP_UI_PracticeMenu_Button_1_C rows,
-//     read each row's list_item.Text (a plain FString). If it starts with
-//     "CPU Opponent Action", capture the row's two label text blocks
+//   - Each (rate-limited) tick: walk live WBP_UI_PracticeMenu_Button_2_C rows
+//     and read each row's list_item.Text — a Gryphon text-id, not the visible
+//     label. Resolve that id to its label ONCE via GetString and cache the
+//     verdict (see g_id_row_cache); later scans are pure pointer reads. For a
+//     "CPU Opponent Action N" row, capture the row's two label text blocks
 //     (TB_Menu_OFF / TB_Menu_ON) along with the replacement string, and
 //     SetRawText them immediately.
 //   - Patch UPolarisTextBlock::SetTextID's UFunction.Func (+0xD8) with a shim
@@ -85,7 +88,11 @@ bool compile_pattern(const char* p, CompiledPattern& out) {
     return out.len > 0;
 }
 
-bool get_text_range(std::uintptr_t& start, std::size_t& size) {
+// Walk Polaris's PE section table. `cb(header, start, size)` returns true to
+// stop the walk early; for_each_section then returns true as well. Returns
+// false if the headers are unreadable or no callback stopped the walk.
+template <typename Fn>
+bool for_each_section(Fn cb) {
     auto base = memory::polaris_base();
     if (!base) return false;
     auto dos = reinterpret_cast<PIMAGE_DOS_HEADER>(base);
@@ -95,13 +102,19 @@ bool get_text_range(std::uintptr_t& start, std::size_t& size) {
     auto first = IMAGE_FIRST_SECTION(nt);
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
         const auto& s = first[i];
-        if (std::strncmp(reinterpret_cast<const char*>(s.Name), ".text", 5) == 0) {
-            start = base + s.VirtualAddress;
-            size = s.Misc.VirtualSize;
+        if (cb(s, base + s.VirtualAddress, static_cast<std::size_t>(s.Misc.VirtualSize)))
             return true;
-        }
     }
     return false;
+}
+
+bool get_text_range(std::uintptr_t& start, std::size_t& size) {
+    return for_each_section([&](const IMAGE_SECTION_HEADER& s, std::uintptr_t addr, std::size_t n) {
+        if (std::strncmp(reinterpret_cast<const char*>(s.Name), ".text", 5) != 0) return false;
+        start = addr;
+        size = n;
+        return true;
+    });
 }
 
 std::uintptr_t scan(const CompiledPattern& pat, std::uintptr_t start, std::size_t size) {
@@ -205,24 +218,39 @@ void resolve_name_pool() {
                      static_cast<unsigned long long>(FNAME_POOL_RVA_HINT));
         return;
     }
-    // Scan a generous .data window for blocks[0] -> "None" block start.
-    for (std::uintptr_t a = base + 0x9400000; a < base + 0x9F20000; a += 8) {
-        std::uint64_t q = 0;
-        if (!memory::try_read_u64(a, &q)) continue;
-        if (q <= 0x10000 || q >= 0x7FFFFFFFFFFFull) continue;
-        std::uint16_t hdr = 0;
-        if (!memory::try_read_u16(static_cast<std::uintptr_t>(q), &hdr)) continue;
-        if ((hdr & 1) != 0 || (hdr >> 6) != 4) continue;
-        std::uint32_t chars = 0;
-        if (!memory::try_read_u32(static_cast<std::uintptr_t>(q) + 2, &chars) ||
-            chars != 0x656E6F4E)
-            continue;
-        if (block0_is_none(a - POOL_BLOCKS_OFFSET)) {
-            g_name_pool = a - POOL_BLOCKS_OFFSET;
-            OPENDOJO_LOG("practice_rename: FNamePool found by scan @ RVA 0x%llX",
-                         static_cast<unsigned long long>(g_name_pool - base));
-            return;
-        }
+    // Scan every writable, non-executable section for a blocks[0] that points
+    // at the "None" entry. The bounds come from the PE section table rather
+    // than a hardcoded [0x9400000, 0x9F20000) window, so a patch that moves or
+    // grows .data cannot push the pool outside the searched range.
+    bool found =
+        for_each_section([](const IMAGE_SECTION_HEADER& s, std::uintptr_t sec, std::size_t n) {
+            const auto ch = s.Characteristics;
+            if (!(ch & IMAGE_SCN_MEM_WRITE) || (ch & IMAGE_SCN_MEM_EXECUTE)) return false;
+            if (n <= POOL_BLOCKS_OFFSET + 8) return false;
+            // Start past POOL_BLOCKS_OFFSET so the a-POOL_BLOCKS_OFFSET
+            // confirmation read below stays inside the section.
+            for (std::uintptr_t a = sec + POOL_BLOCKS_OFFSET; a + 8 <= sec + n; a += 8) {
+                std::uint64_t q = 0;
+                if (!memory::try_read_u64(a, &q)) continue;
+                if (q <= 0x10000 || q >= 0x7FFFFFFFFFFFull) continue;
+                std::uint16_t hdr = 0;
+                if (!memory::try_read_u16(static_cast<std::uintptr_t>(q), &hdr)) continue;
+                if ((hdr & 1) != 0 || (hdr >> 6) != 4) continue;
+                std::uint32_t chars = 0;
+                if (!memory::try_read_u32(static_cast<std::uintptr_t>(q) + 2, &chars) ||
+                    chars != 0x656E6F4E)
+                    continue;
+                if (block0_is_none(a - POOL_BLOCKS_OFFSET)) {
+                    g_name_pool = a - POOL_BLOCKS_OFFSET;
+                    return true;
+                }
+            }
+            return false;
+        });
+    if (found) {
+        OPENDOJO_LOG("practice_rename: FNamePool found by scan @ RVA 0x%llX",
+                     static_cast<unsigned long long>(g_name_pool - base));
+        return;
     }
     OPENDOJO_LOG("practice_rename: FNamePool NOT FOUND (hint+scan failed)");
 }
@@ -521,6 +549,28 @@ std::once_flag g_resolve_once;
 // The trailing remainder ("  N") of the original label is preserved verbatim.
 constexpr const char* SRC_PREFIX = "CPU Opponent Action";
 
+// Text-id -> row verdict cache.
+//
+// A row's list_item.Text is a Gryphon text-id ("TEXT_000_UI_PRACTICE_001"):
+// a stable key, identical on every client. The resolved LABEL is neither —
+// it costs one ProcessEvent per row per scan, and it is localized, so
+// SRC_PREFIX only matches on an English client.
+//
+// So resolve each id at most once and remember the answer:
+//     value >= 1  this id is "CPU Opponent Action N", N = value
+//     value == 0  this id is some other row — skip it, do not re-resolve
+//
+// After the first scan the menu costs zero GetString calls. Ids are plain
+// strings, not UObject pointers, so the cache stays valid across GC and
+// across practice re-entry. Touched only from scan_and_apply_rows (one
+// thread), so it needs no lock.
+//
+// This does not by itself make the feature work on a non-English client:
+// learning an id still needs one successful English prefix match. It does
+// make the fix cheap — the log line below prints the real ids, so the
+// mapping can become a hardcoded, locale-independent table later.
+std::unordered_map<std::string, int> g_id_row_cache;
+
 void do_resolve() {
     resolve_name_pool();
     if (!g_name_pool) {
@@ -802,23 +852,39 @@ void scan_and_apply_rows() {
         std::uint64_t item = 0;
         if (!memory::try_read_u64(raddr + g_r.off_list_item, &item) || !item) continue;
 
-        // item.Text holds the Gryphon text-id (FString); resolve it.
+        // item.Text holds the Gryphon text-id (FString); read it.
         if (read_fstring_ascii(static_cast<std::uintptr_t>(item) + g_r.off_item_text, id_buf,
                                sizeof(id_buf)) < 0)
             continue;
-        wchar_t id_w[128];
-        std::size_t k = 0;
-        for (; id_buf[k] && k + 1 < 128; ++k)
-            id_w[k] = static_cast<wchar_t>(static_cast<unsigned char>(id_buf[k]));
-        id_w[k] = L'\0';
-
-        auto ln = call_get_string(id_w, label_buf, sizeof(label_buf));
-        if (ln < 0) continue;
 
         // Only the "CPU Opponent Action N" rows map to recording slots.
-        if (std::strncmp(label_buf, SRC_PREFIX, plen) != 0) continue;
-        int row_n = std::atoi(label_buf + plen);  // " 5" -> 5
-        if (row_n < 1 || row_n > static_cast<int>(slot_labels::COUNT)) continue;
+        // Consult the cache first; resolve the label only for an id we have
+        // never seen.
+        int row_n = 0;
+        auto cached = g_id_row_cache.find(id_buf);
+        if (cached != g_id_row_cache.end()) {
+            row_n = cached->second;
+        } else {
+            wchar_t id_w[128];
+            std::size_t k = 0;
+            for (; id_buf[k] && k + 1 < 128; ++k)
+                id_w[k] = static_cast<wchar_t>(static_cast<unsigned char>(id_buf[k]));
+            id_w[k] = L'\0';
+
+            // A failed resolve is transient (Gryphon not ready yet), so do
+            // NOT cache it — that would blacklist a real row permanently.
+            if (call_get_string(id_w, label_buf, sizeof(label_buf)) < 0) continue;
+
+            if (std::strncmp(label_buf, SRC_PREFIX, plen) == 0) {
+                int n = std::atoi(label_buf + plen);  // " 5" -> 5
+                if (n >= 1 && n <= static_cast<int>(slot_labels::COUNT)) row_n = n;
+            }
+            g_id_row_cache.emplace(id_buf, row_n);
+            if (row_n > 0)
+                OPENDOJO_LOG("practice_rename: text-id '%s' -> CPU Opponent Action %d", id_buf,
+                             row_n);
+        }
+        if (row_n < 1) continue;
 
         // Slot N's custom name (from the loaded drill). Empty => leave the
         // original game label untouched.
@@ -846,18 +912,22 @@ void scan_and_apply_rows() {
     // un-populated must fall out of g_caps so the shim stops re-stamping it.
     // Apply now so the rename shows without waiting for the next Gryphon
     // resolve.
+    //
+    // Take a copy under the lock and apply from the copy with the lock
+    // RELEASED. call_set_raw_text enters ProcessEvent, which re-enters
+    // SetTextID and therefore set_text_id_shim, which locks g_caps_mtx
+    // itself. std::mutex is not recursive, so applying while holding the
+    // lock self-deadlocks on that path — and blocks the other thread
+    // (game vs render) for the whole apply loop even when it does not.
+    std::vector<Capture> snapshot;
     {
         std::lock_guard<std::mutex> lk(g_caps_mtx);
         g_caps.swap(fresh);
+        snapshot = g_caps;
     }
-    std::size_t applied = 0;
-    {
-        std::lock_guard<std::mutex> lk(g_caps_mtx);
-        for (const auto& c : g_caps) {
-            call_set_raw_text(c.tb, c.replacement.c_str());
-            ++applied;
-        }
-    }
+    for (const auto& c : snapshot)
+        call_set_raw_text(c.tb, c.replacement.c_str());
+    const std::size_t applied = snapshot.size();
     static std::atomic<bool> announced{false};
     if (!announced.exchange(true))
         OPENDOJO_LOG("practice_rename: applied rename to %zu text blocks", applied);

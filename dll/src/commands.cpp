@@ -290,6 +290,34 @@ LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
     return r;
 }
 
+std::size_t capture_populated_slots(opendojo::drill::Drill& d) {
+    std::size_t added = 0;
+    for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
+        auto slot_kind = opendojo::slot::kind(i);
+        if (slot_kind == opendojo::slot::Kind::Empty) continue;
+
+        // The player-typed label wins. Fall back to the positional name so
+        // an unnamed slot still round-trips — but note that "slot N" is
+        // what makes a re-imported row read "slot 3" instead of keeping the
+        // game's own text, so a real name is always better.
+        std::string rec_name = opendojo::slot_labels::get(i);
+        if (rec_name.empty()) rec_name = "slot " + std::to_string(i + 1);
+
+        if (slot_kind == opendojo::slot::Kind::MoveList) {
+            auto move_id = opendojo::slot::movelist_move_id(i);
+            d.recordings.push_back(
+                opendojo::drill::make_movelist_recording(std::move(rec_name), move_id));
+        } else {
+            std::uint8_t bytes[opendojo::slot::SLOT_PITCH];
+            if (!opendojo::slot::read(i, bytes)) continue;
+            d.recordings.push_back(
+                opendojo::drill::make_live_recording(std::move(rec_name), bytes));
+        }
+        ++added;
+    }
+    return added;
+}
+
 ExportResult export_current_slots(std::string_view drill_name, std::string_view description,
                                   std::string_view character, std::string_view cpu_side) {
     ExportResult r;
@@ -323,20 +351,7 @@ ExportResult export_current_slots(std::string_view drill_name, std::string_view 
         d.cpu_side = opendojo::players::side_to_string(cpu.cpu_side);
     }
 
-    for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
-        auto slot_kind = opendojo::slot::kind(i);
-        if (slot_kind == opendojo::slot::Kind::Empty) continue;
-        char rec_name[32];
-        std::snprintf(rec_name, sizeof(rec_name), "slot %zu", i + 1);
-        if (slot_kind == opendojo::slot::Kind::MoveList) {
-            auto move_id = opendojo::slot::movelist_move_id(i);
-            d.recordings.push_back(opendojo::drill::make_movelist_recording(rec_name, move_id));
-        } else {
-            std::uint8_t bytes[opendojo::slot::SLOT_PITCH];
-            if (!opendojo::slot::read(i, bytes)) continue;
-            d.recordings.push_back(opendojo::drill::make_live_recording(rec_name, bytes));
-        }
-    }
+    capture_populated_slots(d);
     if (d.recordings.empty()) {
         r.message = "no slots contain recordings to export";
         return r;
@@ -416,20 +431,7 @@ DrillPayload build_current_slots_payload(std::string_view drill_name,
         d.cpu_side = opendojo::players::side_to_string(cpu.cpu_side);
     }
 
-    for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
-        auto slot_kind = opendojo::slot::kind(i);
-        if (slot_kind == opendojo::slot::Kind::Empty) continue;
-        char rec_name[32];
-        std::snprintf(rec_name, sizeof(rec_name), "slot %zu", i + 1);
-        if (slot_kind == opendojo::slot::Kind::MoveList) {
-            auto move_id = opendojo::slot::movelist_move_id(i);
-            d.recordings.push_back(opendojo::drill::make_movelist_recording(rec_name, move_id));
-        } else {
-            std::uint8_t bytes[opendojo::slot::SLOT_PITCH];
-            if (!opendojo::slot::read(i, bytes)) continue;
-            d.recordings.push_back(opendojo::drill::make_live_recording(rec_name, bytes));
-        }
-    }
+    capture_populated_slots(d);
     if (d.recordings.empty()) {
         r.message = "no slots contain recordings to upload";
         return r;
