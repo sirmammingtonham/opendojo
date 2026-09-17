@@ -14,6 +14,7 @@
 #include <system_error>
 
 #include "commands.hpp"
+#include "file_io.hpp"
 #include "log.hpp"
 
 namespace opendojo::config {
@@ -78,23 +79,22 @@ std::string trim_str(std::string s) {
     return s.substr(a, b - a + 1);
 }
 
-void write_doc_locked(const std::filesystem::path& path, const json& doc) {
+bool write_doc_locked(const std::filesystem::path& path, const json& doc) {
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        OPENDOJO_LOG("config: failed to open %ls for write", path.c_str());
-        return;
+    // Serialize before touching disk; a failed replacement keeps the old file.
+    if (ec || !file_io::replace_file(path, doc.dump(2))) {
+        OPENDOJO_LOG("config: failed to save %ls", path.c_str());
+        return false;
     }
-    // Pretty-print so a curious user opening the file can read it.
-    f << doc.dump(2);
+    return true;
 }
 
-void write_config_locked() {
-    write_doc_locked(config_path(), g_doc);
+bool write_config_locked() {
+    return write_doc_locked(config_path(), g_doc);
 }
-void write_identity_locked() {
-    write_doc_locked(identity_path(), g_identity);
+bool write_identity_locked() {
+    return write_doc_locked(identity_path(), g_identity);
 }
 
 // Copy the four auth fields from a source object into g_identity.
@@ -117,58 +117,49 @@ void adopt_identity_fields_locked(const json& src) {
 // g_identity, the handle stays in g_doc, and stale copies are deleted.
 // Idempotent: missing inputs are skipped, so a fresh install does nothing.
 void migrate_legacy_locked() {
-    bool config_changed = false;
     std::error_code ec;
-
-    // cloud.json -> identity.json (only adopt if we don't already have one).
-    auto cloud_path = legacy_cloud_path();
-    if (std::filesystem::exists(cloud_path, ec)) {
+    const auto cloud_path = legacy_cloud_path();
+    {
         std::ifstream f(cloud_path, std::ios::binary);
         if (f) {
             auto j = json::parse(f, nullptr, false);
-            if (j.is_object() && g_identity.empty()) {
-                adopt_identity_fields_locked(j);
-                write_identity_locked();
-                OPENDOJO_LOG("config: migrated cloud.json into AppData identity.json");
+            f.close();
+            if (j.is_object()) {
+                if (g_identity.empty()) adopt_identity_fields_locked(j);
+                if (!g_identity.empty() && write_identity_locked()) {
+                    std::filesystem::remove(cloud_path, ec);
+                    OPENDOJO_LOG("config: migrated legacy upload identity");
+                }
             }
         }
-        std::filesystem::remove(cloud_path, ec);
     }
 
-    // handle.txt -> cloud.author_handle (stays a game-dir setting).
-    auto handle_path = legacy_handle_path();
-    if (std::filesystem::exists(handle_path, ec)) {
+    const auto handle_path = legacy_handle_path();
+    {
         std::ifstream f(handle_path, std::ios::binary);
         if (f) {
-            std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-            auto v = trim_str(std::move(s));
-            if (!g_doc.contains("cloud")) g_doc["cloud"] = json::object();
-            // Only set if the new field isn't already present — the
-            // user might have written through the new API by now.
-            if (!g_doc["cloud"].contains("author_handle")) {
-                g_doc["cloud"]["author_handle"] = v;
-                config_changed = true;
-                OPENDOJO_LOG("config: migrated handle.txt -> author_handle '%s'", v.c_str());
+            std::string value((std::istreambuf_iterator<char>(f)), {});
+            const bool read_ok = !f.bad();
+            f.close();
+            if (read_ok) {
+                if (!g_doc.contains("cloud") || !g_doc["cloud"].is_object())
+                    g_doc["cloud"] = json::object();
+                if (!g_doc["cloud"].contains("author_handle"))
+                    g_doc["cloud"]["author_handle"] = trim_str(std::move(value));
+                if (write_config_locked()) std::filesystem::remove(handle_path, ec);
             }
         }
-        std::filesystem::remove(handle_path, ec);
     }
 
-    // config.json once embedded the auth bundle under cloud.auth. Lift it out
-    // to AppData identity.json (if we don't already have one) so the identity
-    // survives a reinstall, then strip it from config.json regardless.
     if (g_doc.contains("cloud") && g_doc["cloud"].is_object() && g_doc["cloud"].contains("auth") &&
         g_doc["cloud"]["auth"].is_object()) {
-        if (g_identity.empty()) {
-            adopt_identity_fields_locked(g_doc["cloud"]["auth"]);
-            write_identity_locked();
-            OPENDOJO_LOG("config: moved upload identity from config.json to AppData identity.json");
+        if (g_identity.empty()) adopt_identity_fields_locked(g_doc["cloud"]["auth"]);
+        // Keep the source credentials until their destination is durable.
+        if (!g_identity.empty() && write_identity_locked()) {
+            g_doc["cloud"].erase("auth");
+            write_config_locked();
         }
-        g_doc["cloud"].erase("auth");
-        config_changed = true;
     }
-
-    if (config_changed) write_config_locked();
 }
 
 void hydrate_caches_locked() {
@@ -309,7 +300,8 @@ bool author_handle_exists() {
 std::string author_handle() {
     std::lock_guard lk(g_mtx);
     if (!g_doc.contains("cloud") || !g_doc["cloud"].is_object()) return {};
-    return g_doc["cloud"].value("author_handle", std::string{});
+    const auto it = g_doc["cloud"].find("author_handle");
+    return it != g_doc["cloud"].end() && it->is_string() ? it->get<std::string>() : std::string{};
 }
 
 void set_author_handle(const std::string& value) {
@@ -327,10 +319,16 @@ void set_author_handle(const std::string& value) {
 AuthTokens auth_tokens() {
     AuthTokens t;
     std::lock_guard lk(g_mtx);
-    t.access_token = g_identity.value("access_token", std::string{});
-    t.refresh_token = g_identity.value("refresh_token", std::string{});
-    t.user_id = g_identity.value("user_id", std::string{});
-    t.expires_at_sec = g_identity.value("expires_at", static_cast<std::int64_t>(0));
+    auto string_field = [](const char* key) {
+        const auto it = g_identity.find(key);
+        return it != g_identity.end() && it->is_string() ? it->get<std::string>() : std::string{};
+    };
+    t.access_token = string_field("access_token");
+    t.refresh_token = string_field("refresh_token");
+    t.user_id = string_field("user_id");
+    const auto expiry = g_identity.find("expires_at");
+    if (expiry != g_identity.end() && expiry->is_number_integer())
+        t.expires_at_sec = expiry->get<std::int64_t>();
     return t;
 }
 

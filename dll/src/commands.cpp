@@ -1,4 +1,5 @@
 #include "commands.hpp"
+#include "file_io.hpp"
 
 #include <windows.h>
 
@@ -17,6 +18,8 @@
 #include "log.hpp"
 #include "memory.hpp"
 #include "players.hpp"
+#include "game_thread.hpp"
+#include "ui/menu.hpp"
 #include "slot.hpp"
 #include "slot_labels.hpp"
 #include "subsystems.hpp"
@@ -55,14 +58,12 @@ std::string read_whole_file(const std::filesystem::path& p) {
     f.seekg(0);
     std::string out(static_cast<std::size_t>(size), '\0');
     f.read(out.data(), out.size());
+    if (!f) return {};  // A truncated or failed read must not become a partial drill.
     return out;
 }
 
 bool write_whole_file(const std::filesystem::path& p, const void* data, std::size_t n) {
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    f.write(static_cast<const char*>(data), static_cast<std::streamsize>(n));
-    return f.good();
+    return opendojo::file_io::replace_file(p, std::string_view(static_cast<const char*>(data), n));
 }
 
 // Parse just enough of a drill file to populate a DrillHeader. Reads up to
@@ -71,11 +72,10 @@ bool parse_header_only(const std::filesystem::path& path, DrillHeader& out) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     std::string line;
-    std::size_t bytes = 0;
     constexpr std::size_t LIMIT = 4096;
+    std::size_t remaining = LIMIT;
     out.path = path;
-    while (std::getline(f, line) && bytes < LIMIT) {
-        bytes += line.size() + 1;
+    while (file_io::bounded_getline(f, line, remaining)) {
         // Strip trailing \r from CRLF.
         if (!line.empty() && line.back() == '\r') line.pop_back();
         // Stop at the first recording marker.
@@ -179,6 +179,32 @@ std::vector<DrillHeader> list_drills() {
     return out;
 }
 
+static LoadResult apply_drill(const drill::Drill& d, LoadMode mode,
+                              const std::filesystem::path& path) {
+    LoadResult r;
+    std::vector<std::size_t> targets;
+    const bool replace = mode == LoadMode::ReplaceAll;
+    const auto status = opendojo::slot::import_recordings(d.recordings, replace, targets);
+    if (status != opendojo::slot::WriteStatus::Ok) {
+        r.message = opendojo::slot::describe(status);
+        return r;
+    }
+    // Publish labels only after the complete memory operation succeeded.
+    if (replace) opendojo::slot_labels::clear_all();
+    for (std::size_t i = 0; i < targets.size(); ++i)
+        opendojo::slot_labels::set(targets[i], d.recordings[i].name);
+    if (!opendojo::subsystems::mark_session_loaded(true)) {
+        r.message = "recordings written, but session activation failed";
+        return r;
+    }
+    opendojo::slot::publish_snapshot(true);
+    r.ok = true;
+    r.message = (replace ? "replaced slots with " : "loaded ") + std::to_string(targets.size()) +
+                " recordings";
+    OPENDOJO_LOG("load_drill: %s (%ls)", r.message.c_str(), path.c_str());
+    return r;
+}
+
 LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
     LoadResult r;
     auto text = read_whole_file(path);
@@ -192,141 +218,43 @@ LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
         return r;
     }
     auto& d = decoded.drill;
-
-    // Preflight before allocation, clearing slots, or writing recording bytes.
-    // A missing signature after a patch must not produce a partial import.
-    if (!opendojo::subsystems::in_practice() ||
-        !opendojo::subsystems::lookup(opendojo::subsystems::KEY_GAMEPLAY) ||
-        !opendojo::subsystems::lookup(opendojo::subsystems::KEY_SINGLETON) ||
-        !opendojo::subsystems::lookup(opendojo::subsystems::KEY_SUBB) ||
-        !opendojo::subsystems::lookup(opendojo::subsystems::KEY_SUBC)) {
-        r.message = "practice state unavailable - game patch or scene transition";
-        return r;
-    }
-
-    // pool1 is only required if the drill contains live recordings.
-    // Movelist-only drills can be imported without pool1 being allocated.
-    bool needs_pool1 = false;
-    for (const auto& rec : d.recordings) {
-        if (rec.kind == opendojo::drill::Kind::Live) {
-            needs_pool1 = true;
-            break;
-        }
-    }
-    if (needs_pool1 && !opendojo::subsystems::pool1()) {
-        // Pool isn't allocated yet — first practice load of this
-        // process, user hasn't recorded anything. Force-allocate it
-        // via the same path the game would use on its first record.
-        opendojo::subsystems::ensure_pool_allocated();
-        if (!opendojo::subsystems::pool1()) {
-            r.message = "not ready - enter practice mode first";
-            return r;
-        }
-    }
-
-    if (d.recordings.size() > opendojo::slot::USER_SLOTS) {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "drill has %zu recordings (max %zu)", d.recordings.size(),
-                      opendojo::slot::USER_SLOTS);
-        r.message = buf;
-        return r;
-    }
-    // Install one decoded recording into the chosen target slot. Live
-    // recordings get the 7202 bytes + the live flag chain; movelist
-    // recordings get a move_id + the movelist flag.
-    auto install = [&](std::size_t target,
-                       const opendojo::drill::Recording& rec) -> opendojo::slot::WriteStatus {
-        if (rec.kind == opendojo::drill::Kind::MoveList) {
-            return opendojo::slot::set_movelist(target, rec.move_id);
-        }
-        auto addr = opendojo::slot::address(target);
-        if (!addr) return opendojo::slot::WriteStatus::PoolNotAllocated;
-        opendojo::memory::write_bytes(addr, rec.slot_bytes.data(), opendojo::slot::SLOT_PITCH);
-        return opendojo::slot::set_recorded_flag(target, true);
-    };
-
-    if (mode == LoadMode::ReplaceAll) {
-        for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
-            const auto cleared = opendojo::slot::set_recorded_flag(i, false);
-            if (cleared != opendojo::slot::WriteStatus::Ok) {
-                r.message = "couldn't clear slots - practice state changed";
-                return r;
+    if (!opendojo::game_thread::is_current()) {
+        const bool queued = opendojo::game_thread::enqueue([d = std::move(d), mode,
+                                                            path](bool eligible) {
+            try {
+                const auto result =
+                    eligible
+                        ? apply_drill(d, mode, path)
+                        : LoadResult{false, "load cancelled: practice changed or request expired"};
+                opendojo::menu::queue_toast(result.message, !result.ok);
+            } catch (...) {
+                OPENDOJO_LOG("load_drill: queued import threw; recording state may be incomplete");
+                opendojo::menu::queue_toast(
+                    "load failed unexpectedly; recording state may be incomplete", true);
             }
-        }
-        opendojo::slot_labels::clear_all();
-        for (std::size_t i = 0; i < d.recordings.size(); ++i) {
-            auto s = install(i, d.recordings[i]);
-            if (s != opendojo::slot::WriteStatus::Ok) {
-                char buf[128];
-                std::snprintf(buf, sizeof(buf), "slot %zu: %s", i + 1, opendojo::slot::describe(s));
-                r.message = buf;
-                return r;
-            }
-            opendojo::slot_labels::set(i, d.recordings[i].name);
-        }
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "replaced all slots with %zu recordings",
-                      d.recordings.size());
-        r.ok = true;
-        r.message = buf;
-        OPENDOJO_LOG("load_drill: %s (%ls)", r.message.c_str(), path.c_str());
-        return r;
+        });
+        return {queued, queued ? "load queued" : "game update unavailable or load queue full"};
     }
-
-    // AppendToFree.
-    std::vector<std::size_t> free_slots;
-    for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
-        if (!opendojo::slot::is_populated(i)) free_slots.push_back(i);
-    }
-    if (free_slots.size() < d.recordings.size()) {
-        char buf[160];
-        std::snprintf(buf, sizeof(buf),
-                      "drill needs %zu recording slots, %zu free - use Replace instead",
-                      d.recordings.size(), free_slots.size());
-        r.message = buf;
-        return r;
-    }
-    for (std::size_t i = 0; i < d.recordings.size(); ++i) {
-        auto s = install(free_slots[i], d.recordings[i]);
-        if (s != opendojo::slot::WriteStatus::Ok) {
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "slot %zu: %s", free_slots[i] + 1,
-                          opendojo::slot::describe(s));
-            r.message = buf;
-            return r;
-        }
-        opendojo::slot_labels::set(free_slots[i], d.recordings[i].name);
-    }
-    char buf[160];
-    std::snprintf(buf, sizeof(buf), "loaded %zu recordings into free slots", d.recordings.size());
-    r.ok = true;
-    r.message = buf;
-    OPENDOJO_LOG("load_drill: %s (%ls)", r.message.c_str(), path.c_str());
-    return r;
+    return apply_drill(d, mode, path);
 }
 
-std::size_t capture_populated_slots(opendojo::drill::Drill& d) {
+std::size_t capture_populated_slots(opendojo::drill::Drill& d, bool snapshot_only) {
+    std::array<opendojo::slot::CapturedSlot, opendojo::slot::USER_SLOTS> captured;
+    if (snapshot_only ? !opendojo::slot::capture_snapshot(captured, d.character)
+                      : !opendojo::slot::capture(captured))
+        return 0;
     std::size_t added = 0;
-    for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
-        auto slot_kind = opendojo::slot::kind(i);
-        if (slot_kind == opendojo::slot::Kind::Empty) continue;
-
-        // The player-typed label wins. Fall back to the positional name so
-        // an unnamed slot still round-trips — but note that "slot N" is
-        // what makes a re-imported row read "slot 3" instead of keeping the
-        // game's own text, so a real name is always better.
-        std::string rec_name = opendojo::slot_labels::get(i);
-        if (rec_name.empty()) rec_name = "slot " + std::to_string(i + 1);
-
-        if (slot_kind == opendojo::slot::Kind::MoveList) {
-            auto move_id = opendojo::slot::movelist_move_id(i);
+    for (std::size_t i = 0; i < captured.size(); ++i) {
+        const auto& slot = captured[i];
+        if (slot.kind == opendojo::slot::Kind::Empty) continue;
+        auto name = slot.label;
+        if (name.empty()) name = "slot " + std::to_string(i + 1);
+        if (slot.kind == opendojo::slot::Kind::MoveList) {
             d.recordings.push_back(
-                opendojo::drill::make_movelist_recording(std::move(rec_name), move_id));
+                opendojo::drill::make_movelist_recording(std::move(name), slot.move_id));
         } else {
-            std::uint8_t bytes[opendojo::slot::SLOT_PITCH];
-            if (!opendojo::slot::read(i, bytes)) continue;
             d.recordings.push_back(
-                opendojo::drill::make_live_recording(std::move(rec_name), bytes));
+                opendojo::drill::make_live_recording(std::move(name), slot.bytes.data()));
         }
         ++added;
     }
@@ -348,7 +276,7 @@ ExportResult export_current_slots(std::string_view drill_name, std::string_view 
 
     // Auto-detect from the live game state and let any explicit caller
     // override. detect_cpu() returns detected=false outside a match.
-    auto cpu = opendojo::players::detect_cpu();
+    auto cpu = opendojo::game_thread::current_cpu();
 
     opendojo::drill::Drill d;
     d.name = drill_name.empty() ? timestamp_name() : std::string(drill_name);
@@ -436,7 +364,7 @@ DrillPayload build_current_slots_payload(std::string_view drill_name,
                                          std::string_view description) {
     DrillPayload r;
 
-    auto cpu = opendojo::players::detect_cpu();
+    auto cpu = opendojo::game_thread::current_cpu();
 
     opendojo::drill::Drill d;
     d.name = drill_name.empty() ? timestamp_name() : std::string(drill_name);

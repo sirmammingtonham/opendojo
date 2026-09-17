@@ -8,13 +8,11 @@
 // Live read of P1/P2 character ids and human-vs-CPU side, used at drill
 // export time to auto-fill the drill's character/cpu_side header.
 //
-// Implementation reaches the live Player structs via two AOB patterns in
-// Polaris's .text section, then dereferences a stable two-level pointer
-// chain (the GlobalPlayerHolder) to read character_id at Player+0x168 and
-// main_player_info.player_id (which slot the human is controlling).
-//
-// Patterns and offsets verified live on Tekken 8 v3.00.02. Originally
-// reverse-engineered by Irony (github.com/tomislav-ivankovic/Irony).
+// The holder global and timer are found through native code patterns. Holder
+// fields and character ID are decoded from the player refresh/accessor routines;
+// human side comes from the discovered gameplay field. No fixed info-pointer
+// chain is used. Unsupported layouts disable detection.
+// Originally informed by Irony (github.com/tomislav-ivankovic/Irony).
 //
 // Detection works *only inside a practice/match scene* — outside a match
 // the holder is null. detect_cpu() returns detected=false in that case.
@@ -56,14 +54,12 @@ const char* character_name(std::uint32_t id);
 // range) are skipped by virtue of the playable-id ceiling.
 std::vector<std::string> character_roster();
 
-// True iff a round is actively in progress (not the intro / round-start
-// animation). Reads Player1[0x15C0] = frames_since_round_start (Irony's
-// offset for T8). Returns 0 / false when out of a match or during the
-// intro phase when input is still locked. Used as the deterministic
-// gate for all autoload writes — writing recording-flag state during
-// the intro freezes character input until the user manually re-evaluates
-// state (pause menu open, Select+A reset).
+// Tests the player timer used by the automatic-load gate. Its offset is
+// decoded from a unique counter-update code sequence at startup. Returns
+// false if discovery or memory validation fails; no stale-offset fallback.
+// This timer check does not establish ownership of the game's objects.
 bool round_active();
+bool try_round_counter(std::uint32_t& frames);
 
 // Diagnostic for a round_active() gate that never fires. Logs P1 plus a
 // window of u32s around the frame-counter offset. Call it on successive

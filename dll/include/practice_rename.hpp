@@ -12,7 +12,10 @@
 
 namespace opendojo::practice_rename {
 
-// Per-frame pump. Call from inside the practice-mode gate. Cheap after the
+// Resolve only executable code on the initialization thread. Calls no engine API.
+bool prepare_code();
+
+// Game-thread pump at the native scheduler completion boundary. Cheap after the
 // menu rows are captured (event-driven re-apply via the SetTextID patch).
 void tick();
 
@@ -22,7 +25,7 @@ void tick();
 void on_practice_reentry();
 
 // Call on the in-practice -> not-in-practice edge. Drops the captured
-// text-block pointers: after practice the widgets are GC'd and the allocator
+// weak text-block identities: after practice the widgets are GC'd and the allocator
 // can reuse their addresses for unrelated text blocks (e.g. rematch-screen
 // entries), which the SetTextID shim would then stamp with slot labels.
 void on_practice_exit();

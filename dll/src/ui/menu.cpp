@@ -18,6 +18,7 @@
 #include "config.hpp"
 #include "log.hpp"
 #include "players.hpp"
+#include "game_thread.hpp"
 #include "hooks/render_hook.hpp"
 #include "slot.hpp"
 #include "slot_labels.hpp"
@@ -244,7 +245,7 @@ void draw_drills_tab() {
         "Drills in opendojo/.  Add fills empty slots; Replace clears all slots first.");
     ImGui::Spacing();
 
-    auto cpu = opendojo::players::detect_cpu();
+    auto cpu = opendojo::game_thread::current_cpu();
     const bool can_filter = cpu.detected && !g_state.show_all_drills;
 
     // Count visible vs total under the current filter.
@@ -339,7 +340,6 @@ void draw_drills_tab() {
             if (ImGui::Button("Add##autosave_add")) {
                 auto r = opendojo::commands::load_drill(d.path,
                                                         opendojo::commands::LoadMode::AppendToFree);
-                if (r.ok) opendojo::subsystems::mark_session_loaded(true);
                 show_toast(r.message, !r.ok);
             }
             nav_recenter();
@@ -347,7 +347,6 @@ void draw_drills_tab() {
             if (ImGui::Button("Replace##autosave_replace")) {
                 auto r = opendojo::commands::load_drill(d.path,
                                                         opendojo::commands::LoadMode::ReplaceAll);
-                if (r.ok) opendojo::subsystems::mark_session_loaded(true);
                 show_toast(r.message, !r.ok);
             }
             nav_recenter();
@@ -439,7 +438,6 @@ void draw_drills_tab() {
                     auto r = opendojo::commands::load_drill(
                         d.path, opendojo::commands::LoadMode::AppendToFree);
                     if (r.ok) {
-                        opendojo::subsystems::mark_session_loaded(true);
                         seed_export_form_from(d);
                     }
                     show_toast(r.message, !r.ok);
@@ -450,7 +448,6 @@ void draw_drills_tab() {
                     auto r = opendojo::commands::load_drill(
                         d.path, opendojo::commands::LoadMode::ReplaceAll);
                     if (r.ok) {
-                        opendojo::subsystems::mark_session_loaded(true);
                         seed_export_form_from(d);
                     }
                     show_toast(r.message, !r.ok);
@@ -518,7 +515,7 @@ void draw_drills_tab() {
 
 void draw_recordings_tab() {
     const bool in_practice = opendojo::subsystems::in_practice();
-    auto cpu = opendojo::players::detect_cpu();
+    auto cpu = opendojo::game_thread::current_cpu();
 
     // Count populated slots up front so we can show "N/M recordings" on
     // the right of the status row and only render populated entries in

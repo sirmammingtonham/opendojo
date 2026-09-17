@@ -5,7 +5,7 @@
 // Game-side singletons & recording pools.
 //
 // Polaris stores most gameplay subsystems behind a service-locator hash
-// map (FUN_1418db8f0). The map lives at *(signatures::ctx_ptr_addr()) + 0x10,
+// map (FUN_1418db8f0). The map layout is decoded from the native lookup function,
 // and entries are keyed by a 4-byte hash. Each KEY_* below is the actual
 // hash value (a string-hash of the subsystem's class name) — these are
 // stable across Tekken patches because the class names don't change.
@@ -37,9 +37,7 @@ inline constexpr std::uint32_t KEY_PLAYERS_SUB = 0xC7ECD634;
 // per-side Player* array natural finalize uses; not always resolved in our context
 
 inline constexpr std::uint32_t KEY_RECORDPOOL = 0xA7A8857B;
-// TArray of per-CPU-side 0x140-byte objects; holds move-list slot payloads.
-// Resolve via lookup(), then element[cpu_side] (each elem is 0x140 B), then
-// (slot+1)*8*4 byte rows of 8 uint32 channels at +0x44.
+// Vector of inline per-side objects; layout decoded by signatures::movelist_layout().
 
 inline constexpr std::uint32_t KEY_SUBB = 0xEDFEC9B0;
 // playback-session-armed flag at +0x065; writing 0 mid-intro freezes input
@@ -82,7 +80,7 @@ std::uintptr_t pool2();
 void ensure_pool_allocated();
 
 // Sets the "opponent has a recording session loaded" flag on the CPU's
-// Player struct (Player+0x39C0). The natural post-save finalize
+// Player struct (offset decoded from the native finalizer). The natural post-save finalize
 // (FUN_141911380) writes this; without it the in-game practice UI shows
 // "no recordings" until the user opens/closes the pause menu enough
 // times to trigger a code path that flips it. `loaded`==true writes 1

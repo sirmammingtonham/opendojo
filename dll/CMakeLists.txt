@@ -48,16 +48,14 @@ FetchContent_MakeAvailable(imgui)
 # ---------------------------------------------------------------------------
 # MinHook — inline function detours. We use this instead of COM-vtable
 # swapping because Tekken 8 detects vtable modifications on dxgi.dll and
-# crashes after some delay; inline detours patch the function bytes
-# themselves and aren't caught by the same scan. Pinned to master since
-# the project is mostly dormant and the tagged 1.3.3 release predates
-# modern build tooling fixes.
+# crashes after some delay; inline detours patch the function bytes.
+# Pin the exact revision used by the local validated build.
 # ---------------------------------------------------------------------------
 FetchContent_Declare(
     minhook
     GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
-    GIT_TAG        master
-    GIT_SHALLOW    TRUE)
+    GIT_TAG        8af6b4acae5a9388fd742b56fa79ece89d96f823
+    GIT_SHALLOW    FALSE)
 FetchContent_MakeAvailable(minhook)
 if(MSVC AND TARGET minhook)
     target_compile_options(minhook PRIVATE /W0)
@@ -127,6 +125,8 @@ add_library(opendojo SHARED
     src/commands.cpp
     src/config.cpp
     src/drill.cpp
+    src/file_io.cpp
+    src/game_thread.cpp
     src/log.cpp
     src/memory.cpp
     src/players.cpp
@@ -177,7 +177,7 @@ set(OPENDOJO_CLOUD_PROXY_KEY ""
 # shown in the About tab so users know which patch this build was tested
 # against. NOT read from the running game and NOT recorded on uploads;
 # bump it manually when you finish validating a new patch.
-set(OPENDOJO_TEKKEN_VERSION "3.01.01"
+set(OPENDOJO_TEKKEN_VERSION "3.02.02"
     CACHE STRING "Tekken 8 patch this DLL was confirmed working on")
 
 target_compile_definitions(opendojo PRIVATE

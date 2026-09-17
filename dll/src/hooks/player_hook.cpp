@@ -6,6 +6,7 @@
 #include "MinHook.h"
 
 #include "log.hpp"
+#include "game_thread.hpp"
 #include "memory.hpp"
 #include "players.hpp"
 #include "signatures.hpp"
@@ -37,9 +38,13 @@ using RefreshFn = bool (*)(std::uintptr_t holder);
 RefreshFn g_orig = nullptr;
 
 bool refresh_detour(std::uintptr_t holder) {
-    // Run the original first — it does the actual service-locator
-    // lookup and writes holder+0x30 / +0x38. After it returns, the
-    // pointer slots reflect the NEW state.
+    // This service-locator refresh can republish unchanged players. A refresh
+    // invocation alone is not a session transition; compare its actual writes.
+    const auto layout = signatures::player_layout();
+    std::uint64_t before_p1 = 0, before_p2 = 0;
+    const bool before_valid = holder && layout.p1 && layout.p2 &&
+                              memory::try_read_u64(holder + layout.p1, &before_p1) &&
+                              memory::try_read_u64(holder + layout.p2, &before_p2);
     bool result = g_orig(holder);
 
     // Re-walk the player chain to update the cache. detect_cpu reads
@@ -51,6 +56,15 @@ bool refresh_detour(std::uintptr_t holder) {
     const auto old = g_cpu.exchange(cpu.detected ? DETECTED | cpu.character_id : 0);
     const auto old_id = static_cast<std::uint32_t>(old);
     const bool old_detected = (old & DETECTED) != 0;
+    std::uint64_t after_p1 = 0, after_p2 = 0;
+    const bool after_valid = holder && layout.p1 && layout.p2 &&
+                             memory::try_read_u64(holder + layout.p1, &after_p1) &&
+                             memory::try_read_u64(holder + layout.p2, &after_p2);
+    if (!before_valid || !after_valid || before_p1 != after_p1 || before_p2 != after_p2 ||
+        cpu.detected != old_detected || (cpu.detected && cpu.character_id != old_id)) {
+        OPENDOJO_LOG("player_hook: player identity changed or unreadable; cancelling queued loads");
+        game_thread::invalidate();
+    }
 
     if (cpu.detected != old_detected || cpu.character_id != old_id) {
         OPENDOJO_LOG(

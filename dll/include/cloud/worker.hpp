@@ -7,7 +7,9 @@
 // that owns its own state captures and is responsible for publishing
 // results back to UI state under that UI's own mutex.
 //
-// Lifecycle: start() once at DLL init, stop() once at DLL detach.
+// Lifecycle: start() once at DLL init. Process exit needs no join.
+// stop() is an explicit outside-DllMain operation: discard queued jobs,
+// join the active job, and reject future submissions. Never call from a job.
 // submit() is safe to call from any thread, including before start()
 // (the job will run as soon as the worker thread comes up).
 

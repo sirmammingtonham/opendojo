@@ -1,63 +1,29 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
+#include <string>
+#include <string_view>
+#include "drill.hpp"
 
-// Practice-mode slot read/write.
-//
-// Both live recordings AND move-list "send to slot" entries live in
-// pool1 (`+0x986AC70`), 7202 bytes per slot, max ~1800 events. The
-// event format is 4 bytes — `+0..1` dir/mark+buttons word, `+2` aux,
-// `+3` frames — preceded by a uint16 event_count at slot offset 0.
-//
-// What distinguishes the two is the per-slot flag uint32 at
-// `gameplay + 0x484 + (slot + side*8)*8`:
-//
-//   0 = empty
-//   1 = move-list (programmatic move sequence)
-//   2 = live (user-recorded inputs)
-//
-// (Empirically confirmed via dump_flag_state() — see RE_NOTES.)
-//
-// pool2 (`+0x986AC78`, 1202 B/slot) and the +0x504/+0x544 flag arrays
-// stay at zero during both live recording and move-list select; they
-// belong to a separate feature (Action Interval Recording is the
-// likely owner). OpenDojo currently ignores them.
+// Practice slots: live input recordings use the supported count + four-byte event
+// file format. Native allocation, copy and event-consumer code must confirm that
+// format before pool access. Movelist entries use a separate native vector.
+// Gameplay flags and movelist fields are decoded by signatures at startup.
+// The existing first flag-bank behavior is retained; bank selection is not the
+// same as human-side selection. Pool2 belongs to a separate, unused feature.
 
 namespace opendojo::slot {
 
 inline constexpr std::size_t SLOT_PITCH = 0x1C22;  // pool1 entry, 7202 bytes
 inline constexpr std::size_t USER_SLOTS = 8;
 
-// Per-slot flag array within the gameplay subsystem. Side 0 only — see
-// the file-header note for the side caveat. Flag values:
-//   0 = empty
-//   1 = move-list (programmatic move sequence)
-//   2 = live (user-recorded)
-inline constexpr std::uintptr_t GAMEPLAY_SLOT_BASE = 0x480;
-inline constexpr std::uintptr_t GAMEPLAY_SLOT_STRIDE = 0x08;
-inline constexpr std::uintptr_t GAMEPLAY_SLOT_FLAG = 0x04;  // uint32 within each 8B entry
 inline constexpr std::uint32_t FLAG_EMPTY = 0u;
 inline constexpr std::uint32_t FLAG_MOVELIST = 1u;
 inline constexpr std::uint32_t FLAG_LIVE = 2u;
 
-// Move-list payload storage. All 8 movelist slots share a single
-// uint32[8] array stored at:
-//   recordpool[cpu_side].obj + 0x44 + slot*4
-// where recordpool = lookup(KEY_RECORDPOOL), each element is 0x148 bytes,
-// cpu_side = gameplay[+0x47C] XOR 1. The dispatcher FUN_145f24060 writes
-// the move ID via FUN_14191f220 (verified via flag dump). A move ID of
-// 0xFFFFFFFF means "no movelist set" (the cleared sentinel).
-//
-// The stride was 0x140 up to and including the 2026-08-20 Bob patch; the
-// 2026-09-10 patch grew the element by 8 bytes. Confirmed live: the
-// begin..end span is an exact multiple of 0x148 (0x3D8 = 3 * 0x148) and
-// not of 0x140, and only the 0x148 walk puts the written move ID in the
-// slot it was written to. A wrong stride does NOT fail the n_elem bound
-// check — it silently shifts the read by 8 bytes per cpu_side, so side 0
-// stays correct while side 1 reads two slots off.
-inline constexpr std::uintptr_t RECORDPOOL_OBJ_STRIDE = 0x148;
-inline constexpr std::uintptr_t RECORDPOOL_MOVE_ID_BASE = 0x44;  // obj + 0x44 + slot*4
 inline constexpr std::uint32_t MOVE_ID_NONE = 0xFFFFFFFFu;
 
 // What's currently in this slot, if anything.
@@ -69,6 +35,19 @@ enum class Kind {
 
 const char* kind_name(Kind k);
 
+struct CapturedSlot {
+    Kind kind = Kind::Empty;
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t move_id = MOVE_ID_NONE;
+    std::string label;
+};
+// Operation-local capture. False discards the whole capture on invalid data.
+bool capture(std::array<CapturedSlot, USER_SLOTS>& out);
+// Publish an owned UI/export snapshot from the native update boundary.
+void publish_snapshot(bool force = false);
+// Autosave may use the last owned snapshot of the departing character.
+bool capture_snapshot(std::array<CapturedSlot, USER_SLOTS>& out, std::string_view character);
+
 // Detect which pool holds slot N's data, if any.
 Kind kind(std::size_t slot_idx);
 
@@ -77,12 +56,21 @@ Kind kind(std::size_t slot_idx);
 // the relevant pool to be allocated.
 enum class WriteStatus {
     Ok,
+    InvalidRecording,
+    NoFreeSlots,
+    StateChanged,
+    PartialWrite,
     InvalidSlot,        // slot_idx out of range
     PoolNotAllocated,   // pool ptr still 0 — record once in practice first
     NotInPracticeMode,  // a subsystem lookup returned 0 — user left the scene
 };
 
 const char* describe(WriteStatus s);
+
+// Resolve an operation-local snapshot, validate all payloads/destinations, then
+// write. targets is populated only on success. No game-thread atomicity implied.
+WriteStatus import_recordings(const std::vector<drill::Recording>& recordings, bool replace,
+                              std::vector<std::size_t>& targets);
 
 // Absolute address of slot N's pool1 entry. Returns 0 if pool1 isn't
 // allocated yet or slot_idx is out of range. Used by the import path,
@@ -96,11 +84,8 @@ std::uint16_t event_count(std::size_t slot_idx);
 // True iff kind(slot_idx) != Empty.
 bool is_populated(std::size_t slot_idx);
 
-// Copy slot N's data into `out` (which must be at least SLOT_PITCH
-// bytes). For move-list slots the actual pool2 bytes (POOL2_PITCH) are
-// copied and the trailing tail is zero-padded so downstream code that
-// assumes SLOT_PITCH-sized buffers doesn't read stale memory.
-// Returns false if the slot is empty or the relevant pool isn't allocated.
+// Copy a live-format pool1 slot into `out` (at least SLOT_PITCH bytes).
+// Use capture() for mixed live/movelist contents.
 bool read(std::size_t slot_idx, std::uint8_t* out);
 
 // Write 7202 bytes into pool1 slot N and set the per-slot "recorded"

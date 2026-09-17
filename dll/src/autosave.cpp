@@ -1,5 +1,7 @@
 #include "autosave.hpp"
 
+#include <atomic>
+#include <mutex>
 #include <chrono>
 #include <ctime>
 #include <cstdint>
@@ -9,6 +11,8 @@
 #include <string>
 #include <system_error>
 
+#include "background_worker.hpp"
+#include "file_io.hpp"
 #include "commands.hpp"
 #include "drill.hpp"
 #include "log.hpp"
@@ -48,11 +52,6 @@ struct State {
     // trigger" to the game, and the user can't move until they manually
     // re-evaluate state (open the pause menu, or Select+A reset).
     int round_wait_frames = 0;
-    // Set when the round-active wait times out. The gate is then
-    // skipped for this pending load so the drill still installs
-    // instead of the autoload dying silently. Cleared with pending.
-    bool gate_bypassed = false;
-
     // Practice-mode gate. We tick only while we're inside a practice scene.
     // A small grace window keeps us live for a few frames after the
     // subsystem clears so the exit-from-practice save still fires.
@@ -90,6 +89,23 @@ struct State {
     int watch_rewrites = 0;
 };
 State g_s;
+// is_active() can call on_practice_entered() from tick(); recursion is local
+// to mod state, not a claim that this locks the game's object lifetime.
+std::recursive_mutex g_state_mutex;
+std::atomic<unsigned> g_pending_saves{0};
+
+BackgroundWorker& save_worker() {
+    static auto* worker = [] {
+        auto* w = new BackgroundWorker;
+        w->start();
+        return w;
+    }();
+    return *worker;
+}
+
+struct PendingSave {
+    ~PendingSave() { g_pending_saves.fetch_sub(1, std::memory_order_release); }
+};
 
 constexpr int MAX_FAILURES = 3;                // give up after this many load_drill !ok
 constexpr int RETRY_INTERVAL = 60;             // poll once per second between retries
@@ -148,26 +164,11 @@ void ensure_initialized() {
     OPENDOJO_LOG("autosave: initialized (enabled=%d)", g_s.enabled ? 1 : 0);
 }
 
-// Snapshot every populated slot into a Drill and write it to disk.
-// Returns false only on a real I/O / encode error. Always overwrites
-// the existing autosave file for this character. If no slots are
-// populated, the file is left untouched (see comment below).
+// Capture each slot once and enqueue an owned snapshot for atomic replacement.
+// Returns whether queuing succeeded; I/O failures are logged by the worker.
+// Empty captures leave the existing autosave untouched.
 bool save_for(std::string_view character) {
     auto path = autosave_path(character);
-
-    std::size_t populated_slots = 0;
-    for (std::size_t i = 0; i < slot::USER_SLOTS; ++i) {
-        if (slot::is_populated(i)) ++populated_slots;
-    }
-    if (populated_slots == 0) {
-        // Don't touch the file — preserve whatever was last saved. The
-        // most common "0 populated" case is the leave-practice transition
-        // where the gameplay subsystem has already cleared and we can't
-        // read slot state anymore. Wiping the file there would erase the
-        // user's session. (Manually clearing an autosave is a UI action
-        // we can add later if needed.)
-        return true;
-    }
 
     char timebuf[32];
     {
@@ -187,30 +188,33 @@ bool save_for(std::string_view character) {
     // Same capture path as a manual export, so an autosave preserves the
     // names the player typed. Restoring an autosave therefore restores the
     // practice-menu labels too.
-    commands::capture_populated_slots(d);
+    commands::capture_populated_slots(d, true);
     if (d.recordings.empty()) return true;
 
-    std::error_code ec;
-    std::filesystem::create_directories(commands::drills_dir(), ec);
-    if (ec) {
-        OPENDOJO_LOG("autosave: couldn't create drills dir: %s", ec.message().c_str());
-        return false;
+    // Only the owned snapshot crosses threads. No game pointers are captured.
+    // Serialization and disk I/O run independently of slow cloud requests.
+    auto& worker = save_worker();
+    g_pending_saves.fetch_add(1, std::memory_order_relaxed);
+    try {
+        if (worker.submit([path = std::move(path), snapshot = std::move(d)] {
+                PendingSave done;
+                std::error_code ec;
+                std::filesystem::create_directories(path.parent_path(), ec);
+                if (ec || !file_io::replace_file(path, drill::encode_text(snapshot))) {
+                    OPENDOJO_LOG("autosave: failed to save %ls; previous file preserved",
+                                 path.c_str());
+                    return;
+                }
+                OPENDOJO_LOG("autosave: saved %zu recordings for %s -> %ls",
+                             snapshot.recordings.size(), snapshot.character.c_str(), path.c_str());
+            }))
+            return true;
+    } catch (...) {
+        g_pending_saves.fetch_sub(1, std::memory_order_release);
+        throw;
     }
-
-    auto text = drill::encode_text(d);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        OPENDOJO_LOG("autosave: open-for-write failed: %ls", path.c_str());
-        return false;
-    }
-    f.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!f.good()) {
-        OPENDOJO_LOG("autosave: write failed: %ls", path.c_str());
-        return false;
-    }
-    OPENDOJO_LOG("autosave: saved %zu recordings for %s -> %ls", d.recordings.size(),
-                 std::string(character).c_str(), path.c_str());
-    return true;
+    g_pending_saves.fetch_sub(1, std::memory_order_release);
+    return false;
 }
 
 enum class LoadResult {
@@ -231,6 +235,8 @@ std::size_t live_populated_count() {
 }
 
 LoadResult try_load_once(std::string_view character) {
+    // A rapid return to a character must not load its older on-disk snapshot.
+    if (g_pending_saves.load(std::memory_order_acquire)) return LoadResult::NotReady;
     auto path = autosave_path(character);
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
@@ -268,7 +274,6 @@ void clear_pending() {
     g_s.frames_until_retry = 0;
     g_s.round_wait_frames = 0;
     g_s.frames_since_queue = 0;
-    g_s.gate_bypassed = false;
 }
 
 void clear_watch() {
@@ -283,6 +288,7 @@ void clear_watch() {
 // pending_load state — that's already cleared by the time we get here;
 // the watchdog runs on its own.
 void watchdog_rewrite(std::string_view character) {
+    if (g_pending_saves.load(std::memory_order_acquire)) return;
     auto path = autosave_path(character);
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) return;  // nothing to load
@@ -304,11 +310,13 @@ void watchdog_rewrite(std::string_view character) {
 }  // anonymous namespace
 
 bool is_enabled() {
+    std::lock_guard lock(g_state_mutex);
     ensure_initialized();
     return g_s.enabled;
 }
 
 void set_enabled(bool on) {
+    std::lock_guard lock(g_state_mutex);
     ensure_initialized();
     if (on == g_s.enabled) return;
     if (!write_marker(on)) {
@@ -337,6 +345,10 @@ void set_enabled(bool on) {
 }
 
 void flush_now() {
+    // The destructor runs on the game thread. Never wait for Present while
+    // holding up teardown; the periodic snapshot is the fallback if busy.
+    std::unique_lock lock(g_state_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
     ensure_initialized();
     if (!g_s.enabled) return;
     // Use the latest tracked character. prev_* is updated each tick to
@@ -350,6 +362,7 @@ void flush_now() {
 }
 
 void on_practice_entered() {
+    std::lock_guard lock(g_state_mutex);
     ensure_initialized();
     if (!g_s.enabled) return;
     OPENDOJO_LOG("autosave: practice entered — autoload will fire when round is ready");
@@ -365,6 +378,7 @@ void on_practice_entered() {
 }
 
 void tick() {
+    std::lock_guard lock(g_state_mutex);
     ensure_initialized();
     if (!g_s.enabled) return;
 
@@ -376,7 +390,7 @@ void tick() {
     if (in_practice) {
         g_s.frames_outside_practice = 0;
     } else {
-        ++g_s.frames_outside_practice;
+        if (g_s.frames_outside_practice <= EXIT_GRACE_FRAMES) ++g_s.frames_outside_practice;
     }
     if (g_s.frames_outside_practice > EXIT_GRACE_FRAMES) return;
 
@@ -445,7 +459,6 @@ void tick() {
         g_s.frames_until_retry = 0;
         g_s.round_wait_frames = 0;
         g_s.frames_since_queue = 0;
-        g_s.gate_bypassed = false;
         // Any new queued load supersedes an in-flight watchdog —
         // we're switching characters, so the old watch is irrelevant.
         clear_watch();
@@ -482,7 +495,7 @@ void tick() {
         ++g_s.frames_since_queue;
         const bool min_wait_done = g_s.frames_since_queue >= MIN_WAIT_AFTER_QUEUE;
 
-        if (!g_s.gate_bypassed && (!min_wait_done || !players::round_active())) {
+        if (!min_wait_done || !players::round_active()) {
             ++g_s.round_wait_frames;
             // The gate failing to fire is the one way autoload dies quietly.
             // Dump the frame-counter window once per second for the first
@@ -493,19 +506,11 @@ void tick() {
                 players::log_round_probe();
             }
             if (g_s.round_wait_frames > MAX_ROUND_WAIT_FRAMES) {
-                // Timeout used to abort, which silently killed autoload for
-                // the rest of the session and forced a manual load. Proceed
-                // instead. The gate only exists to keep writes out of the
-                // round-intro window, and 30 seconds is far past any intro,
-                // so the reason to wait has expired either way. This also
-                // keeps autoload alive if the frame-counter offset drifts
-                // again on a future patch.
                 OPENDOJO_LOG(
-                    "autosave: round-active gate didn't fire in %d frames; "
-                    "loading anyway for %s (gate offset may be stale)",
+                    "autosave: round readiness unconfirmed after %d frames; "
+                    "automatic load cancelled for %s (manual load remains available)",
                     MAX_ROUND_WAIT_FRAMES, g_s.pending_load.c_str());
-                g_s.round_wait_frames = 0;
-                g_s.gate_bypassed = true;
+                clear_pending();
             }
             // else: keep waiting
         } else if (g_s.frames_until_retry > 0) {

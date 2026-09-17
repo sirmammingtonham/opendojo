@@ -7,6 +7,7 @@
 #include "MinHook.h"
 
 #include "autosave.hpp"
+#include "game_thread.hpp"
 #include "log.hpp"
 #include "memory.hpp"
 #include "hooks/player_hook.hpp"
@@ -48,7 +49,7 @@ namespace {
 
 std::atomic<bool> g_installed{false};
 // Last observed slot state — drives the 0→nonzero transition that
-// fires autosave::on_practice_entered. is_active() updates it.
+// fires autosave::on_practice_entered. poll() updates it.
 std::atomic<bool> g_prev_active{false};
 
 using DtorFn = void* (*)(void*, unsigned);
@@ -63,10 +64,12 @@ void* dtor_hook(void* this_ptr, unsigned flags) {
         auto singleton = opendojo::memory::read_u64(slot);
         if (singleton == reinterpret_cast<std::uintptr_t>(this_ptr)) {
             OPENDOJO_LOG("practice_state: dtor (this=0x%p) — flushing autosave", this_ptr);
-            // CRITICAL: save BEFORE forwarding to the original dtor.
-            // After this call returns, gameplay subsystems are gone
-            // and save_for can't read slot state.
-            opendojo::autosave::flush_now();
+            // Queue the departing character's owned snapshot before clearing
+            // lifecycle state. No game slot memory is read during teardown.
+            opendojo::autosave::flush_now();  // Off-boundary: saves only the owned snapshot.
+            g_prev_active.store(false, std::memory_order_release);
+            opendojo::game_thread::invalidate();
+            opendojo::player_hook::invalidate();
         }
     }
     return g_dtor_orig(this_ptr, flags);
@@ -89,15 +92,18 @@ bool install_one(void* target, void* shim, void** orig, const char* label) {
 }  // namespace
 
 bool is_active() {
+    return g_prev_active.load(std::memory_order_acquire);
+}
+
+void poll() {
     auto slot = signatures::practice_slot_addr();
-    if (!slot) return false;
+    if (!slot) return;
     std::uint64_t controller = 0;
     bool active = opendojo::memory::try_read_u64(slot, &controller) && controller != 0;
 
     // Detect 0→nonzero transition and notify autosave so it resets its
-    // prev-character state for the new session. Using compare_exchange
-    // so only ONE caller (whichever wins the race on the render thread)
-    // fires the side effect.
+    // prev-character state for the new session. Atomic state also lets the
+    // destructor invalidate visibility before forwarding native teardown.
     bool prev = g_prev_active.load(std::memory_order_acquire);
     if (active != prev) {
         if (g_prev_active.compare_exchange_strong(prev, active, std::memory_order_acq_rel)) {
@@ -113,7 +119,6 @@ bool is_active() {
             }
         }
     }
-    return active;
 }
 
 void install_hooks() {

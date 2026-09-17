@@ -59,7 +59,7 @@ void opendojo::memory::read_bytes(std::uintptr_t addr, void* out, std::size_t n)
     std::memcpy(out, reinterpret_cast<const void*>(addr), n);
 }
 
-bool opendojo::memory::is_readable(std::uintptr_t addr, std::size_t n) {
+static bool accessible(std::uintptr_t addr, std::size_t n, bool writable) {
     if (!addr || !n || n > UINTPTR_MAX - addr) return false;
     const auto end = addr + n;
     while (addr < end) {
@@ -70,7 +70,9 @@ bool opendojo::memory::is_readable(std::uintptr_t addr, std::size_t n) {
         constexpr DWORD READABLE = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
                                    PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                                    PAGE_EXECUTE_WRITECOPY;
-        if ((mbi.Protect & READABLE) == 0) return false;
+        constexpr DWORD WRITABLE = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE |
+                                   PAGE_EXECUTE_WRITECOPY;
+        if ((mbi.Protect & (writable ? WRITABLE : READABLE)) == 0) return false;
         const auto region = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
         if (mbi.RegionSize > UINTPTR_MAX - region) return false;
         const auto next = region + mbi.RegionSize;
@@ -78,6 +80,31 @@ bool opendojo::memory::is_readable(std::uintptr_t addr, std::size_t n) {
         addr = next;
     }
     return true;
+}
+
+bool opendojo::memory::is_readable(std::uintptr_t addr, std::size_t n) {
+    return accessible(addr, n, false);
+}
+bool opendojo::memory::is_writable(std::uintptr_t addr, std::size_t n) {
+    return accessible(addr, n, true);
+}
+bool opendojo::memory::try_read_bytes(std::uintptr_t addr, void* out, std::size_t n) {
+    if (!addr || !out || !n || n > UINTPTR_MAX - addr) return false;
+    __try {
+        std::memcpy(out, reinterpret_cast<const void*>(addr), n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool opendojo::memory::try_write_bytes(std::uintptr_t addr, const void* data, std::size_t n) {
+    if (!addr || !data || !n || n > UINTPTR_MAX - addr) return false;
+    __try {
+        std::memcpy(reinterpret_cast<void*>(addr), data, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 bool opendojo::memory::is_image_data(std::uintptr_t addr, std::size_t n) {

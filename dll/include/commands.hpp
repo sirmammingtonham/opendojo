@@ -74,6 +74,8 @@ struct LoadResult {
     std::string message;  // user-facing toast string
 };
 
+// On the UI thread, ok means accepted into the session-bound queue. Completion
+// arrives through ui::queue_toast. At the native update boundary, runs synchronously.
 LoadResult load_drill(const std::filesystem::path& path, LoadMode mode);
 
 struct ExportResult {
@@ -93,7 +95,7 @@ struct ExportResult {
 //
 // Shared by the local-save, cloud-upload and autosave capture paths so all
 // three emit an identical recording set.
-std::size_t capture_populated_slots(opendojo::drill::Drill& d);
+std::size_t capture_populated_slots(opendojo::drill::Drill& d, bool snapshot_only = false);
 
 // Snapshot every currently-occupied slot (event_count > 0) into one drill
 // file. `drill_name` becomes both the `name:` field and the basis for the

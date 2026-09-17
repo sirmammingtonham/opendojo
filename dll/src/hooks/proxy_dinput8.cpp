@@ -205,7 +205,8 @@ HRESULT WINAPI DirectInput8Create(HINSTANCE h, DWORD v, REFIID r, LPVOID* p, LPU
     return hr;
 }
 HRESULT WINAPI DllCanUnloadNow(void) {
-    return p_DllCanUnloadNow ? p_DllCanUnloadNow() : S_OK;
+    // Permanent callbacks require the proxy to stay loaded until process exit.
+    return S_FALSE;
 }
 HRESULT WINAPI DllGetClassObject(REFCLSID c, REFIID r, LPVOID* p) {
     return p_DllGetClassObject ? p_DllGetClassObject(c, r, p) : E_FAIL;

@@ -7,6 +7,8 @@
 #include "players.hpp"
 #include "practice_state.hpp"
 #include "signatures.hpp"
+#include "game_thread.hpp"
+#include "write_batch.hpp"
 
 namespace {
 
@@ -21,29 +23,35 @@ using PoolInitFn = void (*)(void* this_ptr);
 
 std::uintptr_t opendojo::subsystems::lookup(std::uint32_t hash) {
     // Never substitute a stale RVA when code-based discovery fails.
+    const auto layout = signatures::subsystem_layout();
+    if (!layout.bucket_stride) return 0;
     const auto ctx_slot = signatures::ctx_ptr_addr();
     std::uint64_t ctx = 0, map = 0, sentinel = 0, mask = 0, buckets = 0;
-    if (!memory::try_read_u64(ctx_slot, &ctx) || !ctx || !memory::try_read_u64(ctx + 0x10, &map) ||
-        !map || !memory::try_read_u64(map + 0x100, &sentinel) || !sentinel ||
-        !memory::try_read_u64(map + 0x128, &mask) || !memory::try_read_u64(map + 0x110, &buckets) ||
-        !buckets)
+    if (!memory::try_read_u64(ctx_slot, &ctx) || !ctx || ctx > UINTPTR_MAX - layout.map ||
+        !memory::try_read_u64(ctx + layout.map, &map) || !map || map > UINTPTR_MAX - 0x1008 ||
+        !memory::try_read_u64(map + layout.sentinel, &sentinel) || !sentinel ||
+        !memory::try_read_u64(map + layout.mask, &mask) ||
+        !memory::try_read_u64(map + layout.buckets, &buckets) || !buckets)
         return 0;
     // Bucket counts are powers of two. Bound patch-sensitive address arithmetic.
-    if (mask > 0xFFFF || (mask & (mask + 1)) != 0 || buckets > UINTPTR_MAX - (mask + 1) * 0x10)
+    if (mask > 0xFFFF || (mask & (mask + 1)) != 0 ||
+        buckets > UINTPTR_MAX - (mask + 1) * layout.bucket_stride)
         return 0;
-    const auto bucket = buckets + (mask & hash) * 0x10;
+    const auto bucket = buckets + (mask & hash) * layout.bucket_stride;
     std::uint64_t first = 0, entry = 0;
-    if (!memory::try_read_u64(bucket, &first) || !memory::try_read_u64(bucket + 8, &entry))
+    if (!memory::try_read_u64(bucket, &first) ||
+        !memory::try_read_u64(bucket + layout.bucket_last, &entry))
         return 0;
     for (int steps = 0; entry && entry != sentinel && steps < 64; ++steps) {
+        if (entry > UINTPTR_MAX - 0x100) return 0;
         std::uint32_t key = 0;
         std::uint64_t value = 0;
-        if (!memory::try_read_u32(entry + 0x10, &key)) return 0;
+        if (!memory::try_read_u32(entry + layout.key, &key)) return 0;
         if (key == hash) {
-            return memory::try_read_u64(entry + 0x18, &value) ? value : 0;
+            return memory::try_read_u64(entry + layout.value, &value) ? value : 0;
         }
         if (entry == first) break;
-        if (!memory::try_read_u64(entry + 8, &entry)) return 0;
+        if (!memory::try_read_u64(entry + layout.previous, &entry)) return 0;
     }
     return 0;
 }
@@ -55,6 +63,7 @@ bool opendojo::subsystems::in_practice() {
 }
 
 std::uintptr_t opendojo::subsystems::pool1() {
+    if (!signatures::live_recordings_supported()) return 0;
     return memory::read_u64(signatures::pool1_ptr_addr());
 }
 
@@ -63,44 +72,44 @@ std::uintptr_t opendojo::subsystems::pool2() {
 }
 
 bool opendojo::subsystems::mark_session_loaded(bool loaded) {
-    auto singleton = lookup(KEY_SINGLETON);
-    if (!singleton) {
-        OPENDOJO_LOG("mark_session_loaded: singleton subsystem unresolved");
+    if (!game_thread::is_current()) return false;
+    const auto layout = signatures::session_layout();
+    const auto recording_layout = signatures::recording_state_layout();
+    if (!layout.player_flag || !recording_layout.recording_state) return false;
+    const auto singleton = lookup(KEY_SINGLETON);
+    const auto opponent = players::cpu_player_address();
+    const auto recording = loaded ? lookup(KEY_RECORDING) : 0;
+    if (!singleton || !opponent || (loaded && !recording)) {
+        OPENDOJO_LOG("mark_session_loaded: required subsystem/player unresolved; nothing written");
         return false;
     }
-
-    // Mirror the post-finalize singleton/recording state from the
-    // natural Record→Confirm flow (FUN_141911380).
-    auto word0 = memory::read_u32(singleton);
+    std::uint32_t word0 = 0;
+    if (!memory::try_read_u32(singleton, &word0)) return false;
+    WriteBatch batch;
+    batch.expect(singleton, word0);
+    batch.add(singleton, loaded ? word0 | layout.active_mask : word0 & ~layout.active_mask);
     if (loaded) {
-        memory::write_u32(singleton,
-                          word0 | 0x400000u);  // bit 22: "session exists" — UI gates on this
-        memory::write_u32(singleton + 0x22,
-                          0u);  // "actively recording" — clear to mark "saved, idle"
-        memory::write_u8(singleton + 0x99, 0u);  // mid-record progress flag — clear when done
-        auto recording = lookup(KEY_RECORDING);
-        if (recording)
-            memory::write_u32(
-                recording + 0x28,
-                0u);  // pre_clear's 2nd write; meaning unknown but natural finalize zeroes it
-    } else {
-        memory::write_u32(singleton, word0 & ~0x400000u);  // clear "session exists" bit
+        batch.add(singleton + layout.pending, std::uint32_t{0});
+        batch.add(singleton + layout.finished, std::uint8_t{0});
+        batch.add(recording + recording_layout.recording_state, std::uint32_t{0});
     }
-
-    // opponent_player[0x39C0]: "this opponent has a recording session
-    // loaded for playback". Practice UI gates the playback option on it.
-    // Reached via the GlobalPlayerHolder chain (KEY_PLAYERS_SUB not
-    // reliably resolved in our context).
-    auto opponent = players::cpu_player_address();
-    if (!opponent) {
-        OPENDOJO_LOG("mark_session_loaded: opponent player address unresolved");
+    batch.add(opponent + layout.player_flag, loaded ? 1u : 0u);
+    if (singleton != lookup(KEY_SINGLETON) || opponent != players::cpu_player_address() ||
+        (loaded && recording != lookup(KEY_RECORDING)))
         return false;
+    const auto result = batch.commit();
+    if (result != WriteBatch::Result::Ok) {
+        OPENDOJO_LOG("mark_session_loaded: %s",
+                     result == WriteBatch::Result::PartialWrite
+                         ? "memory changed during writes; state may be partial"
+                         : "preflight rejected; nothing written");
     }
-    memory::write_u32(opponent + 0x39C0, loaded ? 1u : 0u);
-    return true;
+    return result == WriteBatch::Result::Ok;
 }
 
 void opendojo::subsystems::ensure_pool_allocated() {
+    if (!game_thread::is_current()) return;
+    if (!signatures::live_recordings_supported()) return;
     if (memory::read_u64(signatures::pool1_ptr_addr()) != 0) return;
 
     // Pass the real recording subsystem as `this` (not a stack dummy) so

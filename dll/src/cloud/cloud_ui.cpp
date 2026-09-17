@@ -22,6 +22,7 @@
 #include "hooks/render_hook.hpp"
 #include "log.hpp"
 #include "players.hpp"
+#include "game_thread.hpp"
 #include "ui/menu.hpp"
 
 namespace opendojo::cloud::ui {
@@ -590,7 +591,7 @@ void draw_cloud_tab() {
     // game. The re-query only fires in Browse mode, where the filter
     // matters — My uploads ignores it, but the combo index still
     // updates so switching back to Browse lands on the right character.
-    auto cpu = opendojo::players::detect_cpu();
+    auto cpu = opendojo::game_thread::current_cpu();
     if (cpu.detected && cpu.character_name != g_browse.auto_cpu_char) {
         g_browse.auto_cpu_char = cpu.character_name;
         int idx = roster_index_of(cpu.character_name);

@@ -43,6 +43,10 @@ void write_bytes(std::uintptr_t addr, const void* src, std::size_t n);
 // and not a guard page. Use before dereferencing a pointer we don't
 // fully trust (e.g. raw fields that might be stale / garbage).
 bool is_readable(std::uintptr_t addr, std::size_t n);
+bool is_writable(std::uintptr_t addr, std::size_t n);
+// Failed copies may have copied a prefix; no rollback or snapshot guarantee.
+bool try_read_bytes(std::uintptr_t addr, void* out, std::size_t n);
+bool try_write_bytes(std::uintptr_t addr, const void* data, std::size_t n);
 
 // Validate a global slot against Polaris PE section bounds and page protection.
 // Used once during signature resolution, not on the per-frame path.

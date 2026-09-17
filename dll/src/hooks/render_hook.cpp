@@ -79,6 +79,7 @@ ID3D12DescriptorHeap* g_srv_heap = nullptr;
 ID3D12GraphicsCommandList* g_cmd_list = nullptr;
 FrameContext g_frames[MAX_FRAMES]{};
 UINT g_buffer_count = 0;
+UINT g_render_frame = 0;  // Matches ImGui DX12 backend submission order.
 // Single RTV descriptor slot, reused each frame. We acquire the back
 // buffer fresh per Present (no held reference), bind an RTV to it in this
 // slot, render, release the back buffer. The game retains exclusive
@@ -91,7 +92,6 @@ D3D12_CPU_DESCRIPTOR_HANDLE g_rtv_cpu{};
 // tell whether a given allocator's previously-submitted work has finished
 // on the GPU before we Reset it.
 ID3D12Fence* g_fence = nullptr;
-HANDLE g_fence_event = nullptr;
 UINT64 g_fence_next = 0;
 
 // ===========================================================================
@@ -332,11 +332,6 @@ bool init_imgui_resources(IDXGISwapChain3* swapchain) {
         OPENDOJO_LOG("render_hook: CreateFence failed");
         return false;
     }
-    g_fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!g_fence_event) {
-        OPENDOJO_LOG("render_hook: CreateEvent failed (GLE=%lu)", GetLastError());
-        return false;
-    }
 
     OPENDOJO_LOG("render_hook: init step 8/8 — D3D12 resources ready");
     return true;
@@ -517,6 +512,7 @@ bool init_imgui_runtime() {
     dx12_info.Device = g_device;
     dx12_info.CommandQueue = g_queue;
     dx12_info.NumFramesInFlight = static_cast<int>(g_buffer_count);
+    g_render_frame = 0;
     dx12_info.RTVFormat = g_rtv_format;
     dx12_info.SrvDescriptorHeap = g_srv_heap;
     dx12_info.SrvDescriptorAllocFn = srv_pool_alloc;
@@ -794,7 +790,11 @@ void render_frame() {
 
     const UINT idx = g_swapchain->GetCurrentBackBufferIndex();
     if (idx >= g_buffer_count) return;
-    FrameContext& fc = g_frames[idx];
+    const auto* draw_data = ImGui::GetDrawData();
+    if (draw_data->DisplaySize.x <= 0 || draw_data->DisplaySize.y <= 0) return;
+    // ImGui advances its upload-buffer ring only when RenderDrawData runs.
+    // Back-buffer index can diverge when overlay frames are skipped/hidden.
+    FrameContext& fc = g_frames[g_render_frame % g_buffer_count];
     if (!fc.allocator) return;
     // Overlay work is optional. Never stall the game's Present waiting for
     // our previous submission, or reset an allocator still in use by the GPU.
@@ -829,6 +829,7 @@ void render_frame() {
     ID3D12DescriptorHeap* heaps[] = {g_srv_heap};
     g_cmd_list->SetDescriptorHeaps(1, heaps);
 
+    ++g_render_frame;
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_cmd_list);
 
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -1001,37 +1002,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
     // gated on the menu being visible.
     const bool in_practice = opendojo::subsystems::in_practice();
 
-    // Detect the not-in-practice -> in-practice edge here (Present runs every
-    // frame, including during a match) and invalidate practice_rename's cached
-    // UObjects, which the engine reloads across a match. Doing this inside
-    // practice_rename::tick() can't work — tick only runs while in practice.
-    static bool s_prev_in_practice = false;
-    if (in_practice && !s_prev_in_practice) {
-        opendojo::practice_rename::on_practice_reentry();
-    } else if (!in_practice && s_prev_in_practice) {
-        opendojo::practice_rename::on_practice_exit();
-    }
-    s_prev_in_practice = in_practice;
-
-    // Drop custom slot labels when the CPU character changes to a *different*
-    // one. Labels are set by load_drill (manual preset load or autoload) and
-    // belong to whatever character was loaded; without this they'd bleed onto
-    // the next character's manually-selected slots when no new drill is loaded.
-    // ID zero is Paul, not an invalid sentinel. Track validity separately.
-    static std::uint32_t s_prev_cpu_id = 0;
-    static bool s_prev_cpu_valid = false;
-    if (in_practice) opendojo::player_hook::ensure_fresh();
-    auto cpu = opendojo::player_hook::current_cpu();
-    if (in_practice && cpu.detected) {
-        if (s_prev_cpu_valid && cpu.cpu_character_id != s_prev_cpu_id) {
-            opendojo::slot_labels::clear_all();
-            OPENDOJO_LOG("render_hook: CPU character %u -> %u — cleared slot labels", s_prev_cpu_id,
-                         cpu.cpu_character_id);
-        }
-        s_prev_cpu_id = cpu.cpu_character_id;
-        s_prev_cpu_valid = true;
-    }
-
     if (!in_practice) {
         // If the user left practice with the menu open, auto-close so we
         // don't keep drawing it on top of menus/replays.
@@ -1041,7 +1011,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
         // Autosave still gets a chance to fire its "leaving practice"
         // save during the brief exit-grace window; it early-returns
         // after grace and does ~one cheap subsystem lookup per frame.
-        opendojo::autosave::tick();
         return g_present_orig(self, sync_interval, flags);
     }
 
@@ -1051,11 +1020,6 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
     // gamepad nav feed lives in render_frame so it only runs when the
     // menu is visible. See the XInput section comment for the full
     // rationale.
-    opendojo::autosave::tick();
-    // Rename the practice-menu "CPU Opponent Action N" rows in place. Cheap
-    // after the first capture (event-driven re-apply via a SetTextID patch).
-    opendojo::practice_rename::tick();
-
     if (!g_menu_visible.load()) {
         return g_present_orig(self, sync_interval, flags);
     }

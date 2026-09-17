@@ -15,10 +15,11 @@
 
 #include <windows.h>
 
-#include <thread>
+#include <exception>
 
 #include "cloud/worker.hpp"
 #include "config.hpp"
+#include "game_thread.hpp"
 #include "log.hpp"
 #include "memory.hpp"
 #include "players.hpp"
@@ -26,6 +27,7 @@
 #include "hooks/proxy.hpp"
 #include "hooks/render_hook.hpp"
 #include "practice_state.hpp"
+#include "practice_rename.hpp"
 #include "signatures.hpp"
 #include "subsystems.hpp"
 
@@ -60,6 +62,10 @@ void init_thread() {
         OPENDOJO_LOG("WARNING: player signatures unresolved; character detection disabled");
     }
 
+    if (!opendojo::practice_rename::prepare_code()) {
+        OPENDOJO_LOG("WARNING: native-menu code unavailable; rename disabled");
+    }
+
     // pool1 is lazy — null until the user records once per game launch.
     auto p1 = opendojo::subsystems::pool1();
     OPENDOJO_LOG("pool1 = 0x%llX (%s)", static_cast<unsigned long long>(p1),
@@ -84,8 +90,20 @@ void init_thread() {
     // updated synchronously when Tekken refreshes holder.p1/p2. See
     // player_hook.hpp.
     opendojo::player_hook::install();
+    opendojo::game_thread::install();
 
     OPENDOJO_LOG("init thread done — press F12 in game to open menu");
+}
+
+DWORD WINAPI initialize(void*) {
+    try {
+        init_thread();
+    } catch (const std::exception& e) {
+        OPENDOJO_LOG("OpenDojo initialization failed: %s", e.what());
+    } catch (...) {
+        OPENDOJO_LOG("OpenDojo initialization failed");
+    }
+    return 0;
 }
 
 }  // namespace
@@ -103,13 +121,27 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID /*reserved*/) {
                 return FALSE;
             }
 
-            std::thread(init_thread).detach();
+            // Our callbacks and native-menu patches live for the process lifetime.
+            // Refuse dynamic unload rather than leave hooks pointing into freed code.
+            HMODULE pinned = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                        GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                    reinterpret_cast<LPCWSTR>(&DllMain), &pinned))
+                return FALSE;
+            // CreateThread returns without waiting for DLL_THREAD_ATTACH (unlike
+            // a C++ thread startup handshake). The entry runs after loader unlock.
+            HANDLE thread = CreateThread(nullptr, 0, initialize, nullptr, 0, nullptr);
+            if (thread)
+                CloseHandle(thread);
+            else
+                OPENDOJO_LOG("OpenDojo: initialization thread creation failed (%lu)",
+                             GetLastError());
             break;
         }
         case DLL_PROCESS_DETACH:
-            opendojo::cloud::worker::stop();
-            opendojo::log::shutdown();
-            opendojo::proxy::unload();
+            // Process termination: other threads may already be terminated while
+            // holding our locks. No joins, logging, or dependency unload here.
+            // Windows reclaims the pinned module, handles and worker storage.
             break;
     }
     return TRUE;
