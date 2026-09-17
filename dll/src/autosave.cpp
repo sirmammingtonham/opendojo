@@ -48,6 +48,10 @@ struct State {
     // trigger" to the game, and the user can't move until they manually
     // re-evaluate state (open the pause menu, or Select+A reset).
     int round_wait_frames = 0;
+    // Set when the round-active wait times out. The gate is then
+    // skipped for this pending load so the drill still installs
+    // instead of the autoload dying silently. Cleared with pending.
+    bool gate_bypassed = false;
 
     // Practice-mode gate. We tick only while we're inside a practice scene.
     // A small grace window keeps us live for a few frames after the
@@ -264,6 +268,7 @@ void clear_pending() {
     g_s.frames_until_retry = 0;
     g_s.round_wait_frames = 0;
     g_s.frames_since_queue = 0;
+    g_s.gate_bypassed = false;
 }
 
 void clear_watch() {
@@ -440,6 +445,7 @@ void tick() {
         g_s.frames_until_retry = 0;
         g_s.round_wait_frames = 0;
         g_s.frames_since_queue = 0;
+        g_s.gate_bypassed = false;
         // Any new queued load supersedes an in-flight watchdog —
         // we're switching characters, so the old watch is irrelevant.
         clear_watch();
@@ -476,14 +482,30 @@ void tick() {
         ++g_s.frames_since_queue;
         const bool min_wait_done = g_s.frames_since_queue >= MIN_WAIT_AFTER_QUEUE;
 
-        if (!min_wait_done || !players::round_active()) {
+        if (!g_s.gate_bypassed && (!min_wait_done || !players::round_active())) {
             ++g_s.round_wait_frames;
+            // The gate failing to fire is the one way autoload dies quietly.
+            // Dump the frame-counter window once per second for the first
+            // 10 seconds of the wait, so a counter that moved to a nearby
+            // offset shows up as a column that climbs across the dumps.
+            // Bounded, so a legitimate long wait does not flood the log.
+            if (min_wait_done && g_s.round_wait_frames % 60 == 0 && g_s.round_wait_frames <= 600) {
+                players::log_round_probe();
+            }
             if (g_s.round_wait_frames > MAX_ROUND_WAIT_FRAMES) {
+                // Timeout used to abort, which silently killed autoload for
+                // the rest of the session and forced a manual load. Proceed
+                // instead. The gate only exists to keep writes out of the
+                // round-intro window, and 30 seconds is far past any intro,
+                // so the reason to wait has expired either way. This also
+                // keeps autoload alive if the frame-counter offset drifts
+                // again on a future patch.
                 OPENDOJO_LOG(
                     "autosave: round-active gate didn't fire in %d frames; "
-                    "aborting autoload for %s",
+                    "loading anyway for %s (gate offset may be stale)",
                     MAX_ROUND_WAIT_FRAMES, g_s.pending_load.c_str());
-                clear_pending();
+                g_s.round_wait_frames = 0;
+                g_s.gate_bypassed = true;
             }
             // else: keep waiting
         } else if (g_s.frames_until_retry > 0) {

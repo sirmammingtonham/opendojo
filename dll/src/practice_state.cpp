@@ -80,6 +80,7 @@ bool install_one(void* target, void* shim, void** orig, const char* label) {
     }
     if (MH_EnableHook(target) != MH_OK) {
         OPENDOJO_LOG("practice_state: MH_EnableHook(%s) failed", label);
+        MH_RemoveHook(target);
         return false;
     }
     return true;
@@ -90,7 +91,8 @@ bool install_one(void* target, void* shim, void** orig, const char* label) {
 bool is_active() {
     auto slot = signatures::practice_slot_addr();
     if (!slot) return false;
-    bool active = opendojo::memory::read_u64(slot) != 0;
+    std::uint64_t controller = 0;
+    bool active = opendojo::memory::try_read_u64(slot, &controller) && controller != 0;
 
     // Detect 0→nonzero transition and notify autosave so it resets its
     // prev-character state for the new session. Using compare_exchange

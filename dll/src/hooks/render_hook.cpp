@@ -793,12 +793,13 @@ void render_frame() {
     ImGui::Render();
 
     const UINT idx = g_swapchain->GetCurrentBackBufferIndex();
-    if (idx >= g_buffer_count) {
-        ImGui::EndFrame();
-        return;
-    }
+    if (idx >= g_buffer_count) return;
     FrameContext& fc = g_frames[idx];
     if (!fc.allocator) return;
+    // Overlay work is optional. Never stall the game's Present waiting for
+    // our previous submission, or reset an allocator still in use by the GPU.
+    const auto completed = g_fence->GetCompletedValue();
+    if (completed == UINT64_MAX || completed < fc.fence_value) return;
 
     ID3D12Resource* back_buffer = nullptr;
     if (FAILED(g_swapchain->GetBuffer(idx, IID_PPV_ARGS(&back_buffer))) || !back_buffer) {
@@ -806,11 +807,10 @@ void render_frame() {
     }
     g_device->CreateRenderTargetView(back_buffer, nullptr, g_rtv_cpu);
 
-    if (fc.fence_value > 0 && g_fence->GetCompletedValue() < fc.fence_value) {
-        g_fence->SetEventOnCompletion(fc.fence_value, g_fence_event);
-        WaitForSingleObject(g_fence_event, INFINITE);
+    if (FAILED(fc.allocator->Reset())) {
+        back_buffer->Release();
+        return;
     }
-    fc.allocator->Reset();
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -820,7 +820,10 @@ void render_frame() {
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
 
-    g_cmd_list->Reset(fc.allocator, nullptr);
+    if (FAILED(g_cmd_list->Reset(fc.allocator, nullptr))) {
+        back_buffer->Release();
+        return;
+    }
     g_cmd_list->ResourceBarrier(1, &barrier);
     g_cmd_list->OMSetRenderTargets(1, &g_rtv_cpu, FALSE, nullptr);
     ID3D12DescriptorHeap* heaps[] = {g_srv_heap};
@@ -831,13 +834,20 @@ void render_frame() {
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     g_cmd_list->ResourceBarrier(1, &barrier);
-    g_cmd_list->Close();
+    if (FAILED(g_cmd_list->Close())) {
+        back_buffer->Release();
+        return;
+    }
 
     ID3D12CommandList* lists[] = {g_cmd_list};
     g_queue->ExecuteCommandLists(1, lists);
 
     fc.fence_value = ++g_fence_next;
-    g_queue->Signal(g_fence, fc.fence_value);
+    if (FAILED(g_queue->Signal(g_fence, fc.fence_value))) {
+        // Submission may be in flight without a fence. Never reuse its allocator.
+        fc.fence_value = UINT64_MAX;
+        OPENDOJO_LOG("render_hook: fence signal failed; frame allocator retired");
+    }
 
     // CRITICAL: release the back buffer ref before the next ResizeBuffers
     // sees us. The submitted command list still references the resource
@@ -1007,18 +1017,19 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* self, UINT sync_interval,
     // one. Labels are set by load_drill (manual preset load or autoload) and
     // belong to whatever character was loaded; without this they'd bleed onto
     // the next character's manually-selected slots when no new drill is loaded.
-    // Compare non-zero ids only: the detour briefly reports id 0 mid-swap, and
-    // a quickmatch return re-detects the SAME id (no change) so its labels are
-    // kept. The next load_drill re-clears+sets, so clearing here is safe.
+    // ID zero is Paul, not an invalid sentinel. Track validity separately.
     static std::uint32_t s_prev_cpu_id = 0;
+    static bool s_prev_cpu_valid = false;
+    if (in_practice) opendojo::player_hook::ensure_fresh();
     auto cpu = opendojo::player_hook::current_cpu();
-    if (in_practice && cpu.detected && cpu.cpu_character_id != 0) {
-        if (s_prev_cpu_id != 0 && cpu.cpu_character_id != s_prev_cpu_id) {
+    if (in_practice && cpu.detected) {
+        if (s_prev_cpu_valid && cpu.cpu_character_id != s_prev_cpu_id) {
             opendojo::slot_labels::clear_all();
             OPENDOJO_LOG("render_hook: CPU character %u -> %u — cleared slot labels", s_prev_cpu_id,
                          cpu.cpu_character_id);
         }
         s_prev_cpu_id = cpu.cpu_character_id;
+        s_prev_cpu_valid = true;
     }
 
     if (!in_practice) {

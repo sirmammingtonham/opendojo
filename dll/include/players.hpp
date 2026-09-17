@@ -21,6 +21,9 @@
 
 namespace opendojo::players {
 
+// Resolve signatures on the init thread before installing hooks.
+bool resolve_all();
+
 enum class Side : std::uint8_t { p1 = 0, p2 = 1 };
 
 struct CpuInfo {
@@ -61,6 +64,12 @@ std::vector<std::string> character_roster();
 // the intro freezes character input until the user manually re-evaluates
 // state (pause menu open, Select+A reset).
 bool round_active();
+
+// Diagnostic for a round_active() gate that never fires. Logs P1 plus a
+// window of u32s around the frame-counter offset. Call it on successive
+// frames: the real counter is the column that climbs. Rate-limit at the
+// call site — this writes one log line per call.
+void log_round_probe();
 
 // Address of the CPU/opponent's Player struct, or 0 if no match.
 // Reaches the same struct as the natural game code via the

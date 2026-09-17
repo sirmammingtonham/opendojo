@@ -85,7 +85,9 @@ bool compile_pattern(const char* p, CompiledPattern& out) {
             p += 2;
         }
     }
-    return out.len > 0;
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    return out.len > 0 && *p == '\0';
 }
 
 // Walk Polaris's PE section table. `cb(header, start, size)` returns true to
@@ -121,7 +123,16 @@ std::uintptr_t scan(const CompiledPattern& pat, std::uintptr_t start, std::size_
     if (pat.len == 0 || size < pat.len) return 0;
     const auto base = reinterpret_cast<const std::uint8_t*>(start);
     const std::size_t span = size - pat.len + 1;
+    std::uintptr_t hit = 0;
+    std::size_t anchor = 0;
+    while (anchor < pat.len && !pat.mask[anchor])
+        ++anchor;
+    if (anchor == pat.len) return 0;
     for (std::size_t i = 0; i < span; ++i) {
+        const auto found = static_cast<const std::uint8_t*>(
+            std::memchr(base + i + anchor, pat.bytes[anchor], span - i));
+        if (!found) break;
+        i = static_cast<std::size_t>(found - base) - anchor;
         bool match = true;
         for (std::size_t j = 0; j < pat.len; ++j) {
             if (pat.mask[j] && base[i + j] != pat.bytes[j]) {
@@ -129,9 +140,15 @@ std::uintptr_t scan(const CompiledPattern& pat, std::uintptr_t start, std::size_
                 break;
             }
         }
-        if (match) return start + i;
+        if (match) {
+            if (hit) {
+                OPENDOJO_LOG("practice_rename: ambiguous signature; rename disabled");
+                return 0;
+            }
+            hit = start + i;
+        }
     }
-    return 0;
+    return hit;
 }
 
 std::uintptr_t rip_relative(std::uintptr_t at) {
@@ -591,8 +608,19 @@ void do_resolve() {
         OPENDOJO_LOG("practice_rename: pattern scan miss (fuc=%d foc=%d)", h1 ? 1 : 0, h2 ? 1 : 0);
         return;
     }
-    g_r.find_class = reinterpret_cast<FindUnrealClassFn>(rip_relative(h1 + 7));
-    g_r.find_objects_of_class = reinterpret_cast<FindObjectsOfClassFn>(rip_relative(h2 + 1));
+    const auto find_class = rip_relative(h1 + 7);
+    const auto find_objects = rip_relative(h2 + 1);
+    for (auto target : {find_class, find_objects}) {
+        DWORD64 image_base = 0;
+        const auto function = RtlLookupFunctionEntry(target, &image_base, nullptr);
+        if (target < ts || target - ts >= sz || !function ||
+            image_base + function->BeginAddress != target) {
+            OPENDOJO_LOG("practice_rename: rejected call target outside a .text function entry");
+            return;
+        }
+    }
+    g_r.find_class = reinterpret_cast<FindUnrealClassFn>(find_class);
+    g_r.find_objects_of_class = reinterpret_cast<FindObjectsOfClassFn>(find_objects);
 
     g_r.cls_user_widget = g_r.find_class(nullptr, L"/Script/UMG.UserWidget", true);
     g_r.cls_text_block = g_r.find_class(nullptr, L"/Script/Polaris.PolarisTextBlock", true);

@@ -193,6 +193,17 @@ LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
     }
     auto& d = decoded.drill;
 
+    // Preflight before allocation, clearing slots, or writing recording bytes.
+    // A missing signature after a patch must not produce a partial import.
+    if (!opendojo::subsystems::in_practice() ||
+        !opendojo::subsystems::lookup(opendojo::subsystems::KEY_GAMEPLAY) ||
+        !opendojo::subsystems::lookup(opendojo::subsystems::KEY_SINGLETON) ||
+        !opendojo::subsystems::lookup(opendojo::subsystems::KEY_SUBB) ||
+        !opendojo::subsystems::lookup(opendojo::subsystems::KEY_SUBC)) {
+        r.message = "practice state unavailable - game patch or scene transition";
+        return r;
+    }
+
     // pool1 is only required if the drill contains live recordings.
     // Movelist-only drills can be imported without pool1 being allocated.
     bool needs_pool1 = false;
@@ -236,7 +247,11 @@ LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
 
     if (mode == LoadMode::ReplaceAll) {
         for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
-            opendojo::slot::set_recorded_flag(i, false);
+            const auto cleared = opendojo::slot::set_recorded_flag(i, false);
+            if (cleared != opendojo::slot::WriteStatus::Ok) {
+                r.message = "couldn't clear slots - practice state changed";
+                return r;
+            }
         }
         opendojo::slot_labels::clear_all();
         for (std::size_t i = 0; i < d.recordings.size(); ++i) {

@@ -5,7 +5,7 @@
 // Game-side singletons & recording pools.
 //
 // Polaris stores most gameplay subsystems behind a service-locator hash
-// map (FUN_1418db8f0). The map lives at *(polaris + CTX_PTR_OFFSET) + 0x10,
+// map (FUN_1418db8f0). The map lives at *(signatures::ctx_ptr_addr()) + 0x10,
 // and entries are keyed by a 4-byte hash. Each KEY_* below is the actual
 // hash value (a string-hash of the subsystem's class name) — these are
 // stable across Tekken patches because the class names don't change.
@@ -15,15 +15,6 @@
 // the pointer reads as 0.
 
 namespace opendojo::subsystems {
-
-// Service-locator context pointer offset in Polaris's image. Fallback
-// only: lookup() prefers signatures::ctx_ptr_addr(), which resolves CTX
-// AOB-from-xref via the get_ctx anchor (GET_CTX_SIG in signatures.cpp).
-// Refreshed for the 2026-09-10 patch (was 0x954D300 for the 2026-08-20
-// Bob patch, 0x9537300 on v3.01.01). Verified against the AOB-resolved
-// address in a live 2026-09-10 session; the AOB found it either way,
-// this just keeps the fallback from rotting a patch behind.
-inline constexpr std::uintptr_t CTX_PTR_OFFSET = 0x954C300;
 
 // Subsystem hash keys. These were previously offsets into .data that held
 // the actual hash; now we use the hash values directly so we don't depend

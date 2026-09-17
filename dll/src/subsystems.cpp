@@ -20,39 +20,30 @@ using PoolInitFn = void (*)(void* this_ptr);
 }  // anonymous namespace
 
 std::uintptr_t opendojo::subsystems::lookup(std::uint32_t hash) {
-    // Prefer the AOB-resolved CTX address; fall back to the hardcoded
-    // offset if the get_ctx signature didn't resolve (e.g. patch broke
-    // the surrounding function layout). The fallback path matches the
-    // pre-AOB behavior exactly.
-    auto ctx_slot = signatures::ctx_ptr_addr();
-    if (!ctx_slot) {
-        auto base = memory::polaris_base();
-        if (!base) return 0;
-        ctx_slot = base + CTX_PTR_OFFSET;
-    }
-    auto ctx = memory::read_u64(ctx_slot);
-    if (!ctx) return 0;
-    auto map = memory::read_u64(ctx + 0x10);
-    if (!map) return 0;
-
-    auto sentinel = memory::read_u64(map + 0x100);
-    auto mask = memory::read_u64(map + 0x128);
-    auto buckets = memory::read_u64(map + 0x110);
-    if (!buckets) return 0;
-
-    auto bucket = buckets + (mask & hash) * 0x10;
-    auto first = memory::read_u64(bucket);
-    auto entry = memory::read_u64(bucket + 8);
-
-    // Walk the bucket's collision chain. Cap at 64 steps as a sanity bound
-    // — real chains are short, anything deeper means the data is corrupt
-    // or we've snapshotted mid-resize.
+    // Never substitute a stale RVA when code-based discovery fails.
+    const auto ctx_slot = signatures::ctx_ptr_addr();
+    std::uint64_t ctx = 0, map = 0, sentinel = 0, mask = 0, buckets = 0;
+    if (!memory::try_read_u64(ctx_slot, &ctx) || !ctx || !memory::try_read_u64(ctx + 0x10, &map) ||
+        !map || !memory::try_read_u64(map + 0x100, &sentinel) || !sentinel ||
+        !memory::try_read_u64(map + 0x128, &mask) || !memory::try_read_u64(map + 0x110, &buckets) ||
+        !buckets)
+        return 0;
+    // Bucket counts are powers of two. Bound patch-sensitive address arithmetic.
+    if (mask > 0xFFFF || (mask & (mask + 1)) != 0 || buckets > UINTPTR_MAX - (mask + 1) * 0x10)
+        return 0;
+    const auto bucket = buckets + (mask & hash) * 0x10;
+    std::uint64_t first = 0, entry = 0;
+    if (!memory::try_read_u64(bucket, &first) || !memory::try_read_u64(bucket + 8, &entry))
+        return 0;
     for (int steps = 0; entry && entry != sentinel && steps < 64; ++steps) {
-        if (memory::read_u32(entry + 0x10) == hash) {
-            return memory::read_u64(entry + 0x18);
+        std::uint32_t key = 0;
+        std::uint64_t value = 0;
+        if (!memory::try_read_u32(entry + 0x10, &key)) return 0;
+        if (key == hash) {
+            return memory::try_read_u64(entry + 0x18, &value) ? value : 0;
         }
         if (entry == first) break;
-        entry = memory::read_u64(entry + 8);
+        if (!memory::try_read_u64(entry + 8, &entry)) return 0;
     }
     return 0;
 }

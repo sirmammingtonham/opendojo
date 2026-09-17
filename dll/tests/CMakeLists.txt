@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(OpenDojoReliabilityTests LANGUAGES CXX)
+enable_testing()
+add_executable(reliability_tests reliability_tests.cpp ../src/memory.cpp)
+target_include_directories(reliability_tests PRIVATE ../include)
+target_compile_features(reliability_tests PRIVATE cxx_std_20)
+target_compile_options(reliability_tests PRIVATE /W4 /utf-8)
+add_test(NAME reliability COMMAND reliability_tests)

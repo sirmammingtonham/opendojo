@@ -44,6 +44,10 @@ void write_bytes(std::uintptr_t addr, const void* src, std::size_t n);
 // fully trust (e.g. raw fields that might be stale / garbage).
 bool is_readable(std::uintptr_t addr, std::size_t n);
 
+// Validate a global slot against Polaris PE section bounds and page protection.
+// Used once during signature resolution, not on the per-frame path.
+bool is_image_data(std::uintptr_t addr, std::size_t n);
+
 // SEH-guarded reads. If the read AVs (e.g. the source pointer is
 // freed memory, which can happen mid-character-swap when the
 // GlobalPlayerHolder chain is in flux), `*out` is set to 0 and the

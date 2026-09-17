@@ -47,6 +47,25 @@ constexpr std::ptrdiff_t OFF_PLAYER_ID = 0x05;  // u8: 0=human is P1, 1=human is
 constexpr std::ptrdiff_t HOLDER_P1 = 0x30;
 constexpr std::ptrdiff_t HOLDER_P2 = 0x38;
 
+// Player.frames_since_round_start. round_active() is the sole gate on
+// autoload, so a stale value here disables autoload and nothing else.
+//
+// Was 0x15C0, which is correct up to game 3.01.01. Tekken 3.02.01 (the
+// 2026-08-20 patch) grew the Player struct by 0x10 bytes through this
+// region and moved the counter to 0x15D0. Cross-checked against Irony
+// (github.com/tomislav-ivankovic/Irony), commit 77ed8c8 "Update struct
+// offsets for new game version: 3.02.01", which shifted this field and its
+// neighbours — in_rage 0x0F81->0x0F91, cancel_flags 0x0F88->0x0F98,
+// floor_number 0x19A0->0x19B0 — all by the same 0x10.
+//
+// Our PR #7 (the 2026-08-20 fix) changed no players.cpp offsets, so this
+// one was simply missed and has been wrong since that patch.
+//
+// STILL UNVERIFIED for the 2026-09-10 patch: Irony's last offset refresh
+// targets 3.02.01 and its final commit is 2026-08-26, so it has not seen
+// that patch either. log_round_probe() confirms the value at runtime.
+constexpr std::ptrdiff_t OFF_ROUND_FRAMES = 0x15D0;
+
 // main_player_info pointer chain. Irony's trail is [info_global, 0x0, 0x0, 0x20, 0x0].
 // Each step except the first means: dereference, then add the next offset.
 constexpr std::ptrdiff_t INFO_STEP_2 = 0x00;
@@ -122,8 +141,7 @@ bool get_text_range(std::uintptr_t& start, std::size_t& size) {
     return false;
 }
 
-// Scan [start, start+size) for the first match of `pat`. Returns 0 if not
-// found. Logs a warning if more than one match exists (we expect unique sites).
+// Require a unique code site. Ambiguous patterns disable detection.
 std::uintptr_t scan(const CompiledPattern& pat, std::uintptr_t start, std::size_t size) {
     if (pat.bytes.empty() || size < pat.bytes.size()) return 0;
     const auto base = reinterpret_cast<const std::uint8_t*>(start);
@@ -131,7 +149,14 @@ std::uintptr_t scan(const CompiledPattern& pat, std::uintptr_t start, std::size_
     const std::size_t n = pat.bytes.size();
     std::uintptr_t first_hit = 0;
     int hits = 0;
+    const auto anchor = std::find(pat.mask.begin(), pat.mask.end(), 1);
+    if (anchor == pat.mask.end()) return 0;
+    const auto anchor_idx = static_cast<std::size_t>(anchor - pat.mask.begin());
     for (std::size_t i = 0; i < span; ++i) {
+        const auto found = static_cast<const std::uint8_t*>(
+            std::memchr(base + i + anchor_idx, pat.bytes[anchor_idx], span - i));
+        if (!found) break;
+        i = static_cast<std::size_t>(found - base) - anchor_idx;
         bool match = true;
         for (std::size_t j = 0; j < n; ++j) {
             if (pat.mask[j] && base[i + j] != pat.bytes[j]) {
@@ -146,7 +171,7 @@ std::uintptr_t scan(const CompiledPattern& pat, std::uintptr_t start, std::size_
                     "players: WARNING pattern matched %d+ times "
                     "(first=0x%llX)",
                     hits, static_cast<unsigned long long>(first_hit));
-                break;
+                return 0;
             }
         }
     }
@@ -202,6 +227,11 @@ void do_resolve() {
 
     g_resolved.holder_global_slot = rip_relative(hit_players + 3);
     g_resolved.info_global_slot = rip_relative(hit_info + 3);
+    if (!memory::is_image_data(g_resolved.holder_global_slot, 8) ||
+        !memory::is_image_data(g_resolved.info_global_slot, 8)) {
+        OPENDOJO_LOG("players: rejected RIP target outside writable image data");
+        return;
+    }
     g_resolved.ok = true;
     OPENDOJO_LOG("players: resolved holder@0x%llX info@0x%llX",
                  static_cast<unsigned long long>(g_resolved.holder_global_slot),
@@ -282,6 +312,10 @@ const char* character_name_internal(std::uint32_t id) {
 // Public API
 // ---------------------------------------------------------------------------
 
+bool resolve_all() {
+    return ensure_resolved();
+}
+
 const char* character_name(std::uint32_t id) {
     return character_name_internal(id);
 }
@@ -343,6 +377,7 @@ CpuInfo detect_cpu() {
 
     std::uint8_t human_player_id = 0;
     if (!memory::try_read_u8(info + OFF_PLAYER_ID, &human_player_id)) return c;
+    if (human_player_id > 1) return c;
     const bool human_is_p1 = (human_player_id == 0);
 
     auto cpu_ptr = human_is_p1 ? p2 : p1;
@@ -367,12 +402,53 @@ bool round_active() {
     std::uint64_t holder = 0, p1 = 0;
     if (!memory::try_read_u64(g_resolved.holder_global_slot, &holder) || !holder) return false;
     if (!memory::try_read_u64(holder + HOLDER_P1, &p1) || !p1) return false;
-    // T8 Player+0x15C0 = frames_since_round_start (Irony types.zig).
-    // 0 during intro / before FIGHT; ticks up once the round is live
-    // and character input is being processed.
+    // frames_since_round_start: 0 during intro / before FIGHT; ticks up
+    // once the round is live and character input is being processed.
     std::uint32_t frames = 0;
-    if (!memory::try_read_u32(p1 + 0x15C0, &frames)) return false;
+    if (!memory::try_read_u32(p1 + OFF_ROUND_FRAMES, &frames)) return false;
     return frames >= 1;
+}
+
+// Diagnostic for "the round-active gate never fired". Logs P1 and a window
+// of u32s spanning OFF_ROUND_FRAMES. Call it repeatedly: a live frame
+// counter is the column that climbs between consecutive dumps. If the
+// counter sits at a neighbouring offset, this is what makes it visible.
+void log_round_probe() {
+    std::uint64_t holder = 0, p1 = 0;
+    if (!ensure_resolved()) {
+        OPENDOJO_LOG("round_probe: players not resolved");
+        return;
+    }
+    if (!memory::try_read_u64(g_resolved.holder_global_slot, &holder) || !holder) {
+        OPENDOJO_LOG("round_probe: holder null");
+        return;
+    }
+    if (!memory::try_read_u64(holder + HOLDER_P1, &p1) || !p1) {
+        OPENDOJO_LOG("round_probe: p1 null (holder=0x%llX)",
+                     static_cast<unsigned long long>(holder));
+        return;
+    }
+    // Wide enough to span the previous value (0x15C0), the current one
+    // (0x15D0), and another shift of the same size in either direction if
+    // the 2026-09-10 patch moved the struct again.
+    constexpr std::ptrdiff_t WINDOW_BEFORE = 0x40;
+    constexpr std::ptrdiff_t WINDOW_AFTER = 0x40;
+    char line[768];
+    int n = std::snprintf(line, sizeof(line), "round_probe: p1=0x%llX +0x%llX..+0x%llX =",
+                          static_cast<unsigned long long>(p1),
+                          static_cast<unsigned long long>(OFF_ROUND_FRAMES - WINDOW_BEFORE),
+                          static_cast<unsigned long long>(OFF_ROUND_FRAMES + WINDOW_AFTER));
+    for (std::ptrdiff_t off = OFF_ROUND_FRAMES - WINDOW_BEFORE;
+         off <= OFF_ROUND_FRAMES + WINDOW_AFTER && n > 0 && n < static_cast<int>(sizeof(line));
+         off += 4) {
+        std::uint32_t v = 0;
+        bool ok = memory::try_read_u32(static_cast<std::uintptr_t>(p1) + off, &v);
+        // Mark the offset we currently believe in, so the log is readable.
+        const char* tag = (off == OFF_ROUND_FRAMES) ? "*" : "";
+        n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " %s%u%s", tag,
+                           ok ? v : 0u, ok ? "" : "?");
+    }
+    OPENDOJO_LOG("%s", line);
 }
 
 std::uintptr_t holder_address() {
@@ -395,6 +471,7 @@ std::uintptr_t cpu_player_address() {
 
     std::uint8_t human_player_id = 0;
     if (!memory::try_read_u8(info + OFF_PLAYER_ID, &human_player_id)) return 0;
+    if (human_player_id > 1) return 0;
     return (human_player_id == 0) ? p2 : p1;
 }
 

@@ -1,6 +1,7 @@
 #include "hooks/player_hook.hpp"
 
 #include <atomic>
+#include <chrono>
 
 #include "MinHook.h"
 
@@ -27,8 +28,10 @@ namespace {
 // is the live one.
 
 std::atomic<bool> g_installed{false};
-std::atomic<bool> g_detected{false};
-std::atomic<std::uint32_t> g_cpu_character_id{0};
+// Publish validity and ID together; separate atomics can mix two characters.
+constexpr std::uint64_t DETECTED = std::uint64_t{1} << 32;
+std::atomic<std::uint64_t> g_cpu{0};
+std::atomic<bool> g_hook_enabled{false};
 
 using RefreshFn = bool (*)(std::uintptr_t holder);
 RefreshFn g_orig = nullptr;
@@ -45,8 +48,9 @@ bool refresh_detour(std::uintptr_t holder) {
     // inside detect_cpu — if the chain is partially valid we'll
     // get detected=false.
     auto cpu = players::detect_cpu();
-    auto old_id = g_cpu_character_id.exchange(cpu.detected ? cpu.character_id : 0);
-    auto old_detected = g_detected.exchange(cpu.detected);
+    const auto old = g_cpu.exchange(cpu.detected ? DETECTED | cpu.character_id : 0);
+    const auto old_id = static_cast<std::uint32_t>(old);
+    const bool old_detected = (old & DETECTED) != 0;
 
     if (cpu.detected != old_detected || cpu.character_id != old_id) {
         OPENDOJO_LOG(
@@ -61,23 +65,29 @@ bool refresh_detour(std::uintptr_t holder) {
 }  // anonymous namespace
 
 Cached current_cpu() {
-    return {g_detected.load(std::memory_order_acquire),
-            g_cpu_character_id.load(std::memory_order_acquire)};
+    const auto cpu = g_cpu.load(std::memory_order_acquire);
+    return {(cpu & DETECTED) != 0, static_cast<std::uint32_t>(cpu)};
 }
 
 void invalidate() {
-    g_detected.store(false, std::memory_order_release);
-    g_cpu_character_id.store(0, std::memory_order_release);
+    g_cpu.store(0, std::memory_order_release);
 }
 
 void ensure_fresh() {
-    if (g_detected.load(std::memory_order_acquire)) return;
-    auto cpu = players::detect_cpu();
-    if (!cpu.detected) return;
-    g_cpu_character_id.store(cpu.character_id, std::memory_order_release);
-    g_detected.store(true, std::memory_order_release);
-    OPENDOJO_LOG("player_hook: ensure_fresh -> detected id=%u name=%s", cpu.character_id,
-                 cpu.character_name.c_str());
+    const auto before = g_cpu.load(std::memory_order_acquire);
+    if ((before & DETECTED) && g_hook_enabled.load(std::memory_order_acquire)) return;
+    // When a patch breaks the refresh hook, continue detecting character
+    // changes at 4 Hz. Also bound retries during scene transitions.
+    using Clock = std::chrono::steady_clock;
+    static thread_local Clock::time_point next_poll{};
+    const auto now = Clock::now();
+    if (now < next_poll) return;
+    next_poll = now + std::chrono::milliseconds(250);
+    const auto cpu = players::detect_cpu();
+    const auto value = cpu.detected ? DETECTED | cpu.character_id : 0;
+    auto expected = before;
+    // Do not overwrite a newer update from the game-thread refresh hook.
+    g_cpu.compare_exchange_strong(expected, value, std::memory_order_acq_rel);
 }
 
 void install() {
@@ -110,9 +120,11 @@ void install() {
     }
     if (MH_EnableHook(target) != MH_OK) {
         OPENDOJO_LOG("player_hook: MH_EnableHook failed");
+        MH_RemoveHook(target);
         g_installed.store(false);
         return;
     }
+    g_hook_enabled.store(true, std::memory_order_release);
     OPENDOJO_LOG("player_hook: installed at 0x%p", target);
 }
 

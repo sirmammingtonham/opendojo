@@ -60,17 +60,51 @@ void opendojo::memory::read_bytes(std::uintptr_t addr, void* out, std::size_t n)
 }
 
 bool opendojo::memory::is_readable(std::uintptr_t addr, std::size_t n) {
-    if (!addr || !n) return false;
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0) return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    constexpr DWORD READABLE = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
-                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if ((mbi.Protect & READABLE) == 0) return false;
-    if (mbi.Protect & PAGE_GUARD) return false;
-    // The region must cover the requested range.
-    auto region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-    return addr + n <= region_end;
+    if (!addr || !n || n > UINTPTR_MAX - addr) return false;
+    const auto end = addr + n;
+    while (addr < end) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) ||
+            mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD))
+            return false;
+        constexpr DWORD READABLE = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                   PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                   PAGE_EXECUTE_WRITECOPY;
+        if ((mbi.Protect & READABLE) == 0) return false;
+        const auto region = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+        if (mbi.RegionSize > UINTPTR_MAX - region) return false;
+        const auto next = region + mbi.RegionSize;
+        if (next <= addr) return false;
+        addr = next;
+    }
+    return true;
+}
+
+bool opendojo::memory::is_image_data(std::uintptr_t addr, std::size_t n) {
+    const auto base = polaris_base();
+    if (!base || addr < base || !n || n > UINTPTR_MAX - addr) return false;
+    const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return false;
+    const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        return false;
+    const auto rva = addr - base;
+    const auto image_size = nt->OptionalHeader.SizeOfImage;
+    if (rva >= image_size || n > image_size - rva) return false;
+    const auto sections = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const auto& section = sections[i];
+        if (!(section.Characteristics & IMAGE_SCN_MEM_WRITE) ||
+            (section.Characteristics & IMAGE_SCN_MEM_EXECUTE))
+            continue;
+        if (rva >= section.VirtualAddress &&
+            rva - section.VirtualAddress < section.Misc.VirtualSize &&
+            n <= section.Misc.VirtualSize - (rva - section.VirtualAddress)) {
+            return is_readable(addr, n);
+        }
+    }
+    return false;
 }
 
 void opendojo::memory::write_bytes(std::uintptr_t addr, const void* src, std::size_t n) {
@@ -86,6 +120,7 @@ void opendojo::memory::write_bytes(std::uintptr_t addr, const void* src, std::si
 namespace {
 template <typename T>
 bool try_read_at(std::uintptr_t addr, T* out) {
+    if (!out) return false;
     *out = T{};
     if (!addr) return false;
     __try {

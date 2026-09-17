@@ -9,7 +9,7 @@
 // distinctive byte pattern instead of its address) survive patches that
 // don't touch the function body itself — usually most of them.
 //
-// How: resolve_all() walks the .text section once at DLL init and caches
+// How: resolve_all() scans the .text section at DLL init and caches
 // each function's address. Patterns include wildcards (??) for any
 // RIP-relative immediates inside, since those shift if data layout
 // changes even when the surrounding instructions don't.

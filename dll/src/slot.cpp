@@ -127,11 +127,14 @@ static std::uintptr_t movelist_addr(std::size_t slot_idx) {
     auto gameplay = subsystems::lookup(subsystems::KEY_GAMEPLAY);
     auto recordpool = subsystems::lookup(subsystems::KEY_RECORDPOOL);
     if (!gameplay || !recordpool) return 0;
-    auto begin = memory::read_u64(recordpool);
-    auto end = memory::read_u64(recordpool + 8);
-    if (!begin || end <= begin) return 0;
-    auto cpu_side = static_cast<std::uint8_t>(memory::read_u8(gameplay + 0x47C) ^ 1u);
-    std::size_t n_elem = (end - begin) / RECORDPOOL_OBJ_STRIDE;
+    std::uint64_t begin = 0, end = 0;
+    std::uint8_t human_side = 0;
+    if (!memory::try_read_u64(recordpool, &begin) || !memory::try_read_u64(recordpool + 8, &end) ||
+        !memory::try_read_u8(gameplay + 0x47C, &human_side) || human_side > 1)
+        return 0;
+    if (!begin || end <= begin || (end - begin) % RECORDPOOL_OBJ_STRIDE != 0) return 0;
+    const auto cpu_side = static_cast<std::uint8_t>(human_side ^ 1u);
+    const std::size_t n_elem = (end - begin) / RECORDPOOL_OBJ_STRIDE;
     if (cpu_side >= n_elem) return 0;
     auto obj = static_cast<std::uintptr_t>(begin + cpu_side * RECORDPOOL_OBJ_STRIDE);
     return obj + RECORDPOOL_MOVE_ID_BASE + slot_idx * 4;

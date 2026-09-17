@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string_view>
 
 #include "log.hpp"
@@ -102,10 +103,8 @@ constexpr Pattern POOL_INIT_SIG{
 // that happens to live immediately before it (`mov eax, -1 ; ret`)
 // plus 2 bytes of CC padding — that whole 16-byte window is unique.
 //
-// Caveat: this depends on the surrounding function layout. If a patch
-// reshuffles object file order so the -1-returner no longer precedes
-// get_ctx, this signature breaks (logs NOT FOUND). The fallback
-// (CTX_PTR_OFFSET hardcoded in subsystems.hpp) takes over.
+// This anchor depends on neighboring function layout. If it fails, subsystem
+// lookup is disabled rather than following an obsolete absolute RVA.
 constexpr Pattern GET_CTX_SIG{"get_ctx",
                               // `mov eax, -1 ; ret` (the -1-returner) + 2 CC pad + get_ctx body
                               "B8 FF FF FF FF C3 CC CC "
@@ -175,7 +174,10 @@ ScanResult scan_unique(const std::uint8_t* start, std::size_t size, const Patter
 
     const std::size_t end = size - plen;
     for (std::size_t i = 0; i <= end; ++i) {
-        if (start[i + anchor_idx] != anchor_byte) continue;
+        const auto found = static_cast<const std::uint8_t*>(
+            std::memchr(start + i + anchor_idx, anchor_byte, end - i + 1));
+        if (!found) break;
+        i = static_cast<std::size_t>(found - start) - anchor_idx;
         if (!match_at(start + i, pat, plen)) continue;
         if (hit_count == 0) hit = reinterpret_cast<std::uintptr_t>(start + i);
         if (++hit_count >= 4) break;  // ambiguous enough — stop scanning
@@ -218,7 +220,8 @@ std::atomic<std::uintptr_t> g_practice_slot{0};
 std::atomic<std::uintptr_t> g_pool1_ptr{0};
 std::atomic<std::uintptr_t> g_pool2_ptr{0};
 std::atomic<std::uintptr_t> g_ctx_ptr{0};
-std::atomic<bool> g_resolved{false};
+std::once_flag g_resolve_once;
+bool g_resolve_ok = false;
 
 // Decode a 4-byte RIP-relative displacement into the absolute target.
 // `instr_addr` is the address of the first byte of the instruction;
@@ -229,19 +232,6 @@ std::uintptr_t decode_rip32(std::uintptr_t instr_addr, std::size_t disp_off,
     std::int32_t disp;
     std::memcpy(&disp, reinterpret_cast<const void*>(instr_addr + disp_off), sizeof(disp));
     return instr_addr + instr_len + static_cast<std::intptr_t>(disp);
-}
-
-// Scan [start, start+size) for a short pattern. Returns the offset of the
-// first match (or SIZE_MAX if none) — we don't need uniqueness here since
-// we're scanning a known-bounded region (a single function's body).
-std::size_t find_in_range(const std::uint8_t* start, std::size_t size, const PatternByte* pat,
-                          std::size_t plen) {
-    if (plen == 0 || plen > size) return SIZE_MAX;
-    const std::size_t end = size - plen;
-    for (std::size_t i = 0; i <= end; ++i) {
-        if (match_at(start + i, pat, plen)) return i;
-    }
-    return SIZE_MAX;
 }
 
 // Resolve a RIP-relative data reference inside a previously-resolved
@@ -260,14 +250,31 @@ std::uintptr_t resolve_data_ref(const char* label, std::uintptr_t func_addr,
         OPENDOJO_LOG("signatures: %s — pattern decode failed", label);
         return 0;
     }
+    DWORD64 image_base = 0;
+    const auto function = RtlLookupFunctionEntry(func_addr, &image_base, nullptr);
+    if (!function || image_base + function->BeginAddress != func_addr ||
+        function->EndAddress <= function->BeginAddress) {
+        OPENDOJO_LOG("signatures: %s has no matching unwind function boundary", label);
+        return 0;
+    }
+    const auto function_size = function->EndAddress - function->BeginAddress;
+    if (scan_window > function_size) scan_window = function_size;
     auto bytes = reinterpret_cast<const std::uint8_t*>(func_addr);
-    auto off = find_in_range(bytes, scan_window, buf, n);
-    if (off == SIZE_MAX) {
-        OPENDOJO_LOG("signatures: %s — xref instruction not found in %s body", label,
+    const auto text = find_text_section();
+    if (func_addr < text.start || func_addr - text.start >= text.size ||
+        scan_window > text.size - (func_addr - text.start))
+        return 0;
+    const auto match = scan_unique(bytes, scan_window, buf, n);
+    if (match.hit_count != 1) {
+        OPENDOJO_LOG("signatures: %s — xref instruction missing or ambiguous in %s body", label,
                      "resolved function");
         return 0;
     }
-    auto target = decode_rip32(func_addr + off, disp_off, instr_len);
+    auto target = decode_rip32(match.addr, disp_off, instr_len);
+    if (!memory::is_image_data(target, sizeof(std::uintptr_t))) {
+        OPENDOJO_LOG("signatures: %s rejected target outside writable image data", label);
+        return 0;
+    }
     OPENDOJO_LOG("signatures: %s -> 0x%llX", label, static_cast<unsigned long long>(target));
     return target;
 }
@@ -290,6 +297,12 @@ bool scan_one(const Pattern& sig, const std::uint8_t* text, std::size_t size,
                      sig.name, r.hit_count);
         return false;
     }
+    DWORD64 image_base = 0;
+    const auto function = RtlLookupFunctionEntry(r.addr, &image_base, nullptr);
+    if (!function || image_base + function->BeginAddress != r.addr) {
+        OPENDOJO_LOG("signatures: %s match is not an unwind function entry", sig.name);
+        return false;
+    }
     out.store(r.addr, std::memory_order_release);
     OPENDOJO_LOG("signatures: %s -> 0x%llX", sig.name, static_cast<unsigned long long>(r.addr));
     return true;
@@ -297,16 +310,7 @@ bool scan_one(const Pattern& sig, const std::uint8_t* text, std::size_t size,
 
 }  // namespace
 
-bool resolve_all() {
-    bool expected = false;
-    if (!g_resolved.compare_exchange_strong(expected, true)) {
-        // Already resolved (or being resolved by another caller). The
-        // race is harmless — every caller sees the same patterns and
-        // would produce the same result.
-        return g_practice_dtor.load() != 0 && g_player_refresh.load() != 0 &&
-               g_pool_init.load() != 0;
-    }
-
+static bool do_resolve() {
     auto text = find_text_section();
     if (!text.start) {
         OPENDOJO_LOG("signatures: failed to locate Polaris .text section");
@@ -326,7 +330,7 @@ bool resolve_all() {
     // functions for the instructions that touch them. Each xref is a
     // single RIP-relative load/store with a distinctive enough surrounding
     // pattern (xor reg,reg; mov [rip+disp],reg / cmp [rip+disp], rax)
-    // that find_in_range hits the right instruction first.
+    // whose unique match must stay within the unwind function boundary.
 
     // Inside the practice dtor: `xor edi, edi ; mov [rip+disp], rdi`
     // clears the practice-controller singleton slot. The disp32 starts
@@ -347,7 +351,7 @@ bool resolve_all() {
     auto pool1 = resolve_data_ref("pool1_ptr", g_pool_init.load(),
                                   /*scan_window=*/0x40, "48 39 05 ?? ?? ?? ?? 75",
                                   /*disp_off=*/3, /*instr_len=*/7);
-    if (pool1) {
+    if (pool1 && memory::is_image_data(pool1, 16)) {
         g_pool1_ptr.store(pool1, std::memory_order_release);
         // POOL2 lives 8 bytes after POOL1 — they're adjacent qword
         // pointers in the same struct, written consecutively by
@@ -370,21 +374,28 @@ bool resolve_all() {
         if (r.hit_count == 1) {
             auto mov_addr = r.addr + 8;  // skip -1-returner + 2 CC padding
             auto ctx_addr = decode_rip32(mov_addr, /*disp_off=*/3, /*instr_len=*/7);
+            if (!memory::is_image_data(ctx_addr, 8)) {
+                OPENDOJO_LOG("signatures: ctx_ptr rejected target outside writable image data");
+                return false;
+            }
             g_ctx_ptr.store(ctx_addr, std::memory_order_release);
             OPENDOJO_LOG("signatures: ctx_ptr -> 0x%llX",
                          static_cast<unsigned long long>(ctx_addr));
         } else {
             OPENDOJO_LOG(
                 "signatures: ctx_ptr — get_ctx anchor failed (%d matches); "
-                "subsystem lookup will use hardcoded fallback",
+                "subsystem lookup disabled",
                 r.hit_count);
-            // Not a fatal error — subsystems.cpp falls back to the
-            // hardcoded CTX_PTR_OFFSET. We only return false here for
-            // signatures we strictly require.
+            ok = false;
         }
     }
 
     return ok;
+}
+
+bool resolve_all() {
+    std::call_once(g_resolve_once, [] { g_resolve_ok = do_resolve(); });
+    return g_resolve_ok;
 }
 
 std::uintptr_t practice_dtor() {

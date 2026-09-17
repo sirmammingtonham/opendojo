@@ -21,6 +21,7 @@
 #include "config.hpp"
 #include "log.hpp"
 #include "memory.hpp"
+#include "players.hpp"
 #include "hooks/player_hook.hpp"
 #include "hooks/proxy.hpp"
 #include "hooks/render_hook.hpp"
@@ -53,6 +54,10 @@ void init_thread() {
             "WARNING: one or more signatures didn't resolve — affected features "
             "(autosave / character-switch detect / drill auto-allocate) will no-op. "
             "Tekken likely patched. Update signatures.cpp.");
+    }
+
+    if (!opendojo::players::resolve_all()) {
+        OPENDOJO_LOG("WARNING: player signatures unresolved; character detection disabled");
     }
 
     // pool1 is lazy — null until the user records once per game launch.
