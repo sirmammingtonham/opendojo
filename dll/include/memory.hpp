@@ -51,6 +51,7 @@ bool is_readable(std::uintptr_t addr, std::size_t n);
 // chain as unresolvable on this tick" — never as "value is 0".
 bool try_read_u64(std::uintptr_t addr, std::uint64_t* out);
 bool try_read_u32(std::uintptr_t addr, std::uint32_t* out);
+bool try_read_u16(std::uintptr_t addr, std::uint16_t* out);
 bool try_read_u8(std::uintptr_t addr, std::uint8_t* out);
 
 }  // namespace opendojo::memory
