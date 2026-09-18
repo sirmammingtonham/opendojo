@@ -477,11 +477,14 @@ ServiceMessageResult get_service_message() {
         return out;
     }
 
-    // The view already filters to active, non-expired rows and orders
-    // newest-first; we only ever want the single most recent one.
-    auto url = opendojo::cloud::rest_url() + "/active_service_messages?select=message&limit=1";
+    // The view returns the latest title text and applicable update independently.
+    // Older database versions return the newest matching announcement instead.
+    // Selecting all also works before the optional update_version column exists.
+    auto url = opendojo::cloud::rest_url() + "/active_service_messages?select=*&limit=1";
 
-    auto res = opendojo::cloud::http::get(url, standard_headers());
+    auto headers = standard_headers();
+    headers.push_back({"X-OpenDojo-Version", opendojo::cloud::dll_version()});
+    auto res = opendojo::cloud::http::get(url, headers);
     if (auto fail = classify_http_failure(res, "load messages"); fail.failed) {
         out.error_message = std::move(fail.message);
         return out;
@@ -494,6 +497,7 @@ ServiceMessageResult get_service_message() {
     }
     if (!j.empty() && j[0].is_object()) {
         out.message = j[0].value("message", "");
+        out.update_version = value_or(j[0], "update_version", "");
         out.present = !out.message.empty();
     }
     out.ok = true;

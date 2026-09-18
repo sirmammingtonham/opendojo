@@ -32,6 +32,7 @@ jobs:
       - name: Configure (cloud-enabled)
         run: >
           cmake -B dll/build -S dll -A x64
+          -DOPENDOJO_PREVIEW_UPDATE=OFF
           -DOPENDOJO_CLOUD_URL="${{ secrets.OPENDOJO_CLOUD_URL }}"
           -DOPENDOJO_CLOUD_PROXY_KEY="${{ secrets.OPENDOJO_CLOUD_PROXY_KEY }}"
       - name: Build (Release)

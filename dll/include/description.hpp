@@ -20,11 +20,13 @@ struct DescriptionReader {
             line.remove_prefix(1);
         const auto colon = line.find(':');
         auto key = line.substr(0, colon);
-        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.remove_suffix(1);
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t'))
+            key.remove_suffix(1);
         const bool field = colon != std::string_view::npos;
         if (field && key == "description_format") {
             auto value = line.substr(colon + 1);
-            while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+                value.remove_prefix(1);
             if (value != "pipe_lines" || explicit_lines) return Result::Invalid;
             literal_lines = true;
             continuing = false;
@@ -64,8 +66,8 @@ struct DescriptionReader {
 
 private:
     static Result append(std::string_view value, std::string& out, bool newline) {
-        if (value.find('\0') != std::string_view::npos ||
-            value.size() > MAX_BYTES || out.size() + value.size() + newline > MAX_BYTES)
+        if (value.find('\0') != std::string_view::npos || value.size() > MAX_BYTES ||
+            out.size() + value.size() + newline > MAX_BYTES)
             return Result::Invalid;
         if (newline) out += '\n';
         out.append(value);

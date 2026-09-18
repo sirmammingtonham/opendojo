@@ -522,11 +522,24 @@ svg.timeseries {
             <div class="card" style="margin-bottom: 16px;">
                 <h2 style="margin-top:0;">Broadcast a message</h2>
                 <p>
-                    Shown in the mod's title bar to every user (e.g. "New update available").
+                    Shown in the mod's title bar to the selected audience (e.g. "New update available").
                     Clients display the single newest <strong>active</strong>, non-expired
                     message. Keep it short — 200 characters max. Publish a new one to replace
-                    what's showing; deactivate to clear the bar.
+                    what's showing for that audience. Deactivating it reveals the next matching message, if any.
+                    Mods that do not report their version are treated as 0.5.0 (the original cloud release).
                 </p>
+                <div class="row" style="margin-bottom: 12px;">
+                    <label for="msg-audience">Audience</label>
+                    <select id="msg-audience">
+                        <option value="global">Global</option>
+                        <option value="range">Version range</option>
+                    </select>
+                    <span id="msg-range" hidden>
+                        <label>From <input id="msg-min-version" placeholder="e.g. 0.6.0" maxlength="20" style="width: 130px;"></label>
+                        <label>Through <input id="msg-max-version" placeholder="e.g. 0.9.0" maxlength="20" style="width: 130px;"></label>
+                        Inclusive; leave one end blank for no limit. Use the same version at both ends to target one release.
+                    </span>
+                </div>
                 <div class="row">
                     <input id="msg-text" type="text" maxlength="200"
                         placeholder="New update available — grab the latest build from the Discord."
@@ -537,6 +550,11 @@ svg.timeseries {
                         <option value="urgent">urgent</option>
                     </select>
                     <button class="primary" id="msg-publish">Publish</button>
+                </div>
+                <div class="row" style="margin-top: 12px;">
+                    <label for="msg-update-version">Update notice for release (optional)</label>
+                    <input id="msg-update-version" placeholder="e.g. 0.7.0" maxlength="20" style="width: 130px;">
+                    <span>Leave blank for a general announcement. Update notices appear only on older versions and link to the latest release. Message text is optional for updates; the title message and update banner are selected independently.</span>
                 </div>
             </div>
 
@@ -1212,7 +1230,7 @@ document.getElementById('ban-add').addEventListener('click', () => {
 async function refreshMessages() {
     try {
         const rows = await supa(
-            '/rest/v1/service_messages?select=id,message,severity,active,expires_at,created_at&order=created_at.desc&limit=50');
+            '/rest/v1/service_messages?select=id,message,severity,active,expires_at,created_at,min_version,max_version,update_version&order=created_at.desc&limit=50');
         const tb = document.getElementById('msgs-tbody');
         tb.innerHTML = '';
         if (!rows.length) {
@@ -1229,7 +1247,10 @@ async function refreshMessages() {
                     : '<span style="color:var(--green)">live</span>');
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td class="wrap">${escapeHtml(m.message)}</td>
+                <td class="wrap">${escapeHtml(m.message)}<div style="color:var(--dim)">${escapeHtml(
+                    m.min_version || m.max_version
+                        ? `Versions ${m.min_version ?? 'any'} through ${m.max_version ?? 'any'} (inclusive)`
+                        : 'Global')}${m.update_version ? ` · Update to ${escapeHtml(m.update_version)}` : ''}</div></td>
                 <td>${escapeHtml(m.severity)}</td>
                 <td>${activeCell}</td>
                 <td>${new Date(m.created_at).toLocaleString()}</td>
@@ -1246,17 +1267,41 @@ async function refreshMessages() {
     } catch (e) { toast('messages: ' + e.message, false); }
 }
 
+document.getElementById('msg-audience').addEventListener('change', (e) => {
+    document.getElementById('msg-range').hidden = e.target.value !== 'range';
+});
+
 document.getElementById('msg-publish').addEventListener('click', async () => {
     const message = document.getElementById('msg-text').value.trim();
     const severity = document.getElementById('msg-severity').value;
-    if (!message) { toast('message required', false); return; }
+    const ranged = document.getElementById('msg-audience').value === 'range';
+    const min_version = ranged ? document.getElementById('msg-min-version').value.trim() || null : null;
+    const max_version = ranged ? document.getElementById('msg-max-version').value.trim() || null : null;
+    if (ranged && !min_version && !max_version) {
+        toast('Enter at least one version bound, or choose Global.', false); return;
+    }
+    const versionPattern = /^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/;
+    const update_version = document.getElementById('msg-update-version').value.trim() || null;
+    if (!message && !update_version) { toast('Enter message text or an update release version.', false); return; }
+    if ([min_version, max_version, update_version].some(v => v !== null && !versionPattern.test(v))) {
+        toast('Use numeric versions such as 0.6.0 (no v prefix).', false); return;
+    }
+    if (min_version && max_version) {
+        const lower = min_version.split('.').map(Number);
+        const upper = max_version.split('.').map(Number);
+        const different = lower.findIndex((part, i) => part !== upper[i]);
+        if (different !== -1 && lower[different] > upper[different]) {
+            toast('The minimum version must not exceed the maximum.', false); return;
+        }
+    }
     try {
         await supa('/rest/v1/service_messages', {
             method: 'POST',
             headers: { 'Prefer': 'return=minimal' },
-            body: JSON.stringify({ message, severity, active: true }),
+            body: JSON.stringify({ message, severity, active: true, min_version, max_version, update_version }),
         });
         document.getElementById('msg-text').value = '';
+        document.getElementById('msg-update-version').value = '';
         toast('published');
         await refreshMessages();
     } catch (e) { toast(e.message, false); }

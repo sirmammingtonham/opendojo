@@ -36,6 +36,7 @@ void poll_service_message();
 // hasn't been fetched yet. Read on the render thread to build the
 // window title. Always safe to call.
 std::string service_message();
+std::string update_version();
 
 // Mark the Cloud tab's "already downloaded" index stale so it re-scans the
 // local drills folder on its next render. Call whenever the local library

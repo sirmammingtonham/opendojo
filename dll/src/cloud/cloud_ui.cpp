@@ -268,6 +268,7 @@ void set_upload_status(std::string msg, bool err) {
 struct ServiceMsgState {
     std::mutex mtx;
     std::string text;  // current message ("" = none / not yet fetched)
+    std::string update_version;
     std::atomic<bool> in_flight{false};
 };
 ServiceMsgState g_service_msg;
@@ -1410,6 +1411,7 @@ void poll_service_message() {
             if (!r.ok) return;
             std::lock_guard lk(g_service_msg.mtx);
             g_service_msg.text = r.present ? r.message : std::string{};
+            g_service_msg.update_version = r.update_version;
         },
         [] { g_service_msg.in_flight.store(false); });
 }
@@ -1417,6 +1419,11 @@ void poll_service_message() {
 std::string service_message() {
     std::lock_guard lk(g_service_msg.mtx);
     return g_service_msg.text;
+}
+
+std::string update_version() {
+    std::lock_guard lk(g_service_msg.mtx);
+    return g_service_msg.update_version;
 }
 
 void mark_local_library_dirty() {

@@ -172,6 +172,10 @@ set(OPENDOJO_CLOUD_URL ""
     CACHE STRING "OpenDojo Cloud endpoint URL")
 set(OPENDOJO_CLOUD_PROXY_KEY ""
     CACHE STRING "OpenDojo Cloud access key")
+option(OPENDOJO_PREVIEW_UPDATE "Force the update banner for local UI testing" OFF)
+if(OPENDOJO_PREVIEW_UPDATE)
+    target_compile_definitions(opendojo PRIVATE OPENDOJO_PREVIEW_UPDATE=1)
+endif()
 
 # Tekken patch this DLL is *confirmed working on*. Purely informational —
 # shown in the About tab so users know which patch this build was tested

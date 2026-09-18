@@ -790,6 +790,57 @@ const char* pad_btn_name(std::uint16_t mask) {
     }
 }
 
+// Only fixed project URLs are opened; cloud messages cannot supply a URL.
+void open_project_page(bool releases) {
+    wchar_t windir[MAX_PATH];
+    const UINT n = GetSystemWindowsDirectoryW(windir, MAX_PATH);
+    bool opened = false;
+    if (n > 0 && n < MAX_PATH) {
+        const std::wstring exe = std::wstring(windir) + L"\\explorer.exe";
+        const wchar_t* url = releases
+                                 ? L"https://github.com/sirmammingtonham/opendojo/releases/latest"
+                                 : L"https://github.com/sirmammingtonham/opendojo";
+        std::wstring cmd = L"\"" + exe + L"\" \"" + url + L"\"";
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        opened = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                                nullptr, &si, &pi) != FALSE;
+        if (opened) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+    }
+    if (!opened) show_toast("Couldn't open the mod homepage in your browser.", true);
+}
+
+void draw_update_banner() {
+    const auto version = opendojo::cloud::ui::update_version();
+#ifndef OPENDOJO_PREVIEW_UPDATE
+    if (version.empty()) return;
+#endif
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 7.0f));
+    if (ImGui::BeginTable("##update_notice", 2,
+                          ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX)) {
+        const float button_width = ImGui::CalcTextSize("Download update").x +
+                                   ImGui::GetStyle().FramePadding.x * 2;
+        ImGui::TableSetupColumn("notice", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("download", ImGuiTableColumnFlags_WidthFixed, button_width);
+        ImGui::TableNextRow();
+        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(85, 70, 30, 100));
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.45f, 1.0f), "Update available");
+        ImGui::TableNextColumn();
+        if (ImGui::Button("Download update")) open_project_page(true);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+            ImGui::SetTooltip("Open the latest release in your browser.");
+        ImGui::EndTable();
+    }
+    ImGui::PopStyleVar();
+    ImGui::Spacing();
+}
+
 void draw_settings_tab() {
     ImGui::TextDisabled("Persisted to opendojo/config.json");
     ImGui::Spacing();
@@ -888,6 +939,10 @@ void draw_about_tab() {
         "Save and share practice-mode recordings as text drill files. "
         "Each drill contains one or more recordings; loading places them "
         "into the in-game recording slots.");
+    ImGui::Spacing();
+    if (ImGui::Button("Mod homepage")) open_project_page(false);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+        ImGui::SetTooltip("https://github.com/sirmammingtonham/opendojo");
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
@@ -1075,6 +1130,8 @@ void draw() {
     } else if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) {
         g_state.pending_tab = (g_state.active_tab + 1) % kTabCount;
     }
+
+    draw_update_banner();
 
     if (ImGui::BeginTabBar("##tabs")) {
         for (int i = 0; i < kTabCount; ++i) {

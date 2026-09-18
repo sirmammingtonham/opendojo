@@ -72,5 +72,7 @@ jobs:
       - run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
       - name: Push migrations
         run: supabase db push
-      - name: Deploy edge function
-        run: supabase functions deploy submit_drill --project-ref "$SUPABASE_PROJECT_REF"
+      - name: Deploy edge functions
+        run: |
+          supabase functions deploy submit_drill --project-ref "$SUPABASE_PROJECT_REF"
+          supabase functions deploy update_drill --project-ref "$SUPABASE_PROJECT_REF"
