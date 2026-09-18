@@ -8,10 +8,12 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string_view>
 
 #include "log.hpp"
 #include "memory.hpp"
+#include "native_scan.hpp"
 
 namespace opendojo::signatures {
 
@@ -41,15 +43,10 @@ struct Pattern {
 
 // --- Pattern definitions ---------------------------------------------------
 //
-// Each pattern is anchored on the function's prologue + a distinctive
-// near-prologue feature (vtable load, magic constant, etc.). Wildcards
-// only on RIP-relative offsets (the 4-byte immediates inside lea/mov/call
-// instructions) — everything else is exact.
+// Short anchors identify candidates; decoded contracts verify the operations and
+// relationships used by the mod. Displacements are read from actual instructions.
+// ABI constants stay strict where the mod's data representation depends on them.
 //
-// To regenerate: read the function's first ~50 bytes from the EXE (RVA
-// from Ghidra → file offset using PE section headers), then replace
-// every 4-byte RIP-relative immediate with `?? ?? ?? ??`.
-
 // This is a leaf function without unwind metadata. Match its complete body,
 // including both key comparisons, traversal branches and both returns.
 constexpr Pattern SUBSYSTEM_LOOKUP_SIG{
@@ -60,16 +57,22 @@ constexpr Pattern SUBSYSTEM_LOOKUP_SIG{
     "44 3B 48 ?? 75 F1 EB 02 33 C0 48 85 C0 48 0F 44 C2 48 3B C2 "
     "74 05 48 8B 40 ?? C3 33 C0 C3"};
 
-SubsystemLayout decode_subsystem_layout(const std::uint8_t* code, std::size_t size) {
-    if (!code || size < 92) return {};
-    auto field = [code](std::size_t at) {
-        std::uint32_t result;
-        std::memcpy(&result, code + at, 4);
-        return result;
-    };
-    if (code[27] < 4 || code[27] > 8) return {};
-    SubsystemLayout l{code[3],  field(10), field(17), field(31), 1u << code[27],
-                      code[38], code[50],  code[61],  code[87]};
+SubsystemLayout subsystem_at(const native_scan::Function& fn) {
+    const auto m =
+        native_scan::unique(fn,
+                            "4C 8B 41 ?? 44 8B 0A 49 8B 88 ?? ?? ?? ?? 49 8B 90 ?? ?? ?? ?? "
+                            "49 23 C9 48 C1 E1 ?? 49 03 88 ?? ?? ?? ?? 48 8B 41 ?? 48 3B C2 "
+                            "74 ?? 48 8B 09 44 3B 48 ?? 74 ?? 48 3B C1 74 ?? 48 8B 40 ?? "
+                            "44 3B 48 ?? 75 ?? EB ?? 33 C0 48 85 C0 48 0F 44 C2 48 3B C2 "
+                            "74 ?? 48 8B 40 ?? C3 33 C0 C3");
+    if (!m || m[5].decoded.imm.imm8 < 4 || m[5].decoded.imm.imm8 > 8 ||
+        m[9].relative() != m[19].address || m[12].relative() != m[20].address ||
+        m[14].relative() != m[19].address || m[17].relative() != m[13].address ||
+        m[18].relative() != m[20].address || m[23].relative() != m[26].address)
+        return {};
+    auto field = [&](std::size_t i) { return static_cast<std::uint32_t>(m[i].displacement()); };
+    SubsystemLayout l{field(0), field(2),  field(3),  field(6), 1u << m[5].decoded.imm.imm8,
+                      field(7), field(11), field(15), field(24)};
     // disp8 operands are signed; accept only positive, aligned fields.
     auto qword = [](std::uint32_t v) { return v && v <= 0x1000 && v % 8 == 0; };
     if (!qword(l.map) || l.map >= 128 || !qword(l.mask) || !qword(l.sentinel) ||
@@ -77,200 +80,46 @@ SubsystemLayout decode_subsystem_layout(const std::uint8_t* code, std::size_t si
         l.sentinel == l.buckets || !qword(l.bucket_last) || l.bucket_last >= 128 ||
         l.bucket_last + 8 > l.bucket_stride || !qword(l.previous) || l.previous >= 128 ||
         !qword(l.value) || l.value >= 128 || !l.key || l.key >= 128 || l.key % 4 ||
-        l.key != code[65] || l.value == l.previous ||
+        l.key != field(16) || l.value == l.previous ||
         (l.key < l.previous + 8 && l.key + 4 > l.previous) ||
         (l.key < l.value + 8 && l.key + 4 > l.value))
         return {};
     return l;
 }
-
-constexpr Pattern MOVE_WRAPPER_SIG{
-    "move_wrapper",
-    "48 89 5C 24 10 57 48 83 EC 20 8B FA 48 8B D9 E8 ?? ?? ?? ?? 0F BE 8B ?? ?? ?? ?? 48 8D 54 24 "
-    "30 83 F1 01 89 4C 24 30 48 8B C8 E8 ?? ?? ?? ?? 48 85 C0 74 18 44 8B C7 33 D2 48 8B C8 E8 ?? "
-    "?? ?? ?? 48 8B 5C 24 38 48 83 C4 20 5F C3 48 8B 5C 24 38 B8 FF FF FF FF 48 83 C4 20 5F C3"};
-constexpr Pattern MOVE_ELEMENT_SIG{
-    "move_element",
-    "48 63 02 83 F8 FF 74 38 4C 8B 01 4C 8B C8 48 8B 49 ?? 48 B8 ?? ?? ?? ?? ?? ?? ?? ?? 49 2B C8 "
-    "48 F7 E9 48 C1 FA ?? 48 8B C2 48 C1 E8 3F 48 03 D0 4C 3B CA 73 0B 49 69 C1 ?? ?? ?? ?? 49 03 "
-    "C0 C3 33 C0 C3"};
-constexpr Pattern MOVE_FIELD_SIG{
-    "move_field",
-    "41 83 F8 07 77 0F 49 63 C0 48 63 D2 48 8D 14 D0 8B 44 91 ?? C3 B8 FF FF FF FF C3"};
-
-MovelistLayout decode_movelist_layout(const std::uint8_t* wrapper, std::size_t wn,
-                                      const std::uint8_t* element, std::size_t en,
-                                      const std::uint8_t* field, std::size_t fn) {
-    if (!wrapper || !element || !field || wn < 92 || en < 67 || fn < 27) return {};
-    MovelistLayout l;
-    std::memcpy(&l.human_side, wrapper + 23, 4);
-    std::memcpy(&l.element_stride, element + 56, 4);
-    l.vector_end = element[17];
-    l.move_ids = field[19];
-    if (!l.human_side || l.human_side > 0x10000 || l.element_stride < 64 ||
-        l.element_stride > 0x10000 || l.element_stride % 8 || l.vector_end < 8 ||
-        l.vector_end >= 128 || l.vector_end % 8 || l.move_ids < 4 || l.move_ids >= 128 ||
-        l.move_ids % 4 || l.move_ids + 32 > l.element_stride || element[37] > 30)
-        return {};
-    // The bounds-check division and the indexed address must use the same size.
-    std::uint64_t magic = 0, high = 0;
-    std::memcpy(&magic, element + 20, 8);
-    if (magic >> 63) return {};  // This instruction shape uses positive signed magic.
-    const auto low = _umul128(magic, l.element_stride, &high);
-    if (high != (1ull << element[37]) || low >= l.element_stride) return {};
-    return l;
+SubsystemLayout decode_subsystem_layout(const std::uint8_t* code, std::size_t size) {
+    const auto at = reinterpret_cast<std::uintptr_t>(code);
+    return subsystem_at(native_scan::decode(at, at + size));
 }
 
-constexpr Pattern SLOT_FLAGS_SIG{
-    "slot_flags",
-    "48 89 5C 24 ?? 48 89 6C 24 ?? 56 48 83 EC 20 48 63 EA 41 8B C1 41 8B D8 48 8B F1 83 FD 07 0F "
-    "87 73 01 00 00 83 F8 02 0F 8D 6A 01 00 00 85 C0 79 05 E8 ?? ?? ?? ?? 48 63 C8 48 8D 0C CD ?? "
-    "?? ?? ?? 48 03 CD 89 9C CE ?? ?? ?? ?? 83 FB 02 75 1F 44 8B CD 41 B0 01 33 D2 48 8B CE 48 8B "
-    "5C 24 ?? 48 8B 6C 24 ?? 48 83 C4 20 5E E9 ?? ?? ?? ??"};
+constexpr Pattern MOVE_WRAPPER_SIG{"move_wrapper", "0F BE 8B ?? ?? ?? ?? 48 8D 54 24 ?? 83 F1 01"};
 
-constexpr Pattern SESSION_COUNTER_SIG{
-    "session_counter",
-    "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 41 8B F8 48 8B F2 48 8B D9 E8 ?? ?? ?? ?? 8B 80 "
-    "?? ?? ?? ?? 39 06 75 13 89 7B ?? 48 8B 5C 24 30 48 8B 74 24 38 48 83 C4 20 5F C3 48 8B CB E8 "
-    "?? ?? ?? ?? 8B 80 ?? ?? ?? ?? 39 06 75 03 89 7B ?? 48 8B 5C 24 30 48 8B 74 24 38 48 83 C4 20 "
-    "5F C3"};
-constexpr Pattern SUBB_PAUSE_SIG{
-    "subb_pause",
-    "48 89 5C 24 08 57 48 83 EC 20 80 79 ?? 00 0F B6 DA 48 8B F9 75 30 84 D2 74 2C E8 ?? ?? ?? ?? "
-    "48 8D 15 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? B2 01 48 8B C8 E8 ?? ?? ?? ?? 88 5F ?? 48 8B 5C "
-    "24 30 48 83 C4 20 5F C3 88 59 ?? 48 8B 5C 24 30 48 83 C4 20 5F C3"};
-constexpr Pattern SUBC_RESET_SIG{
-    "subc_reset",
-    "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 30 33 F6 0F 29 74 24 20 89 71 ?? 48 8B D9 C7 41 ?? "
-    "26 00 00 00 8B FE C7 41 ?? 26 00 00 00 0F 1F 40 00 48 0F BE C7 48 69 C8 ?? ?? ?? ?? 48 89 B4 "
-    "19 ?? ?? ?? ?? 48 89 B4 19 ?? ?? ?? ?? 48 89 B4 19 ?? ?? ?? ?? 89 B4 19 ?? ?? ?? ?? 48 81 C1 "
-    "?? ?? ?? ?? 48 03 CB E8 ?? ?? ?? ?? FF C7 83 FF 02 7C C0"};
-constexpr Pattern SUBC_ITEM_SIG{
-    "subc_item", "33 D2 48 C7 41 ?? FF FF FF FF 33 C0 48 89 11 48 89 51 ?? 0F 57 C0 48 89 51 ??"};
-constexpr Pattern RECORDING_STATE_SIG{
-    "recording_state",
-    "48 89 5C 24 08 57 48 83 EC 20 8B FA 48 8B D9 E8 ?? ?? ?? ?? 84 C0 74 56 89 7B ?? 89 7B ?? 83 "
-    "EF 01 74 1D 83 FF 01 75 46"};
+constexpr Pattern SLOT_FLAGS_SIG{"slot_flags",
+                                 "48 8D 0C CD ?? ?? ?? ?? 48 03 CD 89 9C CE ?? ?? ?? ??"};
 
-constexpr Pattern PLAYER_FIELDS_SIG{
-    "player_fields",
-    "48 89 43 ?? 8B 07 39 05 ?? ?? ?? ?? 0F 8F D0 00 00 00 8B 05 ?? ?? ?? ?? 89 44 24 ?? E8 ?? ?? "
-    "?? ?? 48 8D 15 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 8D 54 24 ?? 48 8B C8 E8 ?? ?? ?? ?? 84 "
-    "C0 74 23 E8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 8D 54 24 ?? 48 8B C8 "
-    "E8 ?? ?? ?? ?? EB 02 33 C0 48 83 7B ?? 00 48 89 43 ??"};
+constexpr Pattern SESSION_COUNTER_SIG{"session_counter",
+                                      "48 8B CB E8 ?? ?? ?? ?? 8B 80 ?? ?? ?? ?? 39 06"};
+constexpr Pattern SUBB_PAUSE_SIG{"pause_transition", "80 79 ?? 00 0F B6 DA 48 8B F9"};
+constexpr Pattern SUBC_RESET_SIG{"side_record_reset", "48 0F BE C7 48 69 C8 ?? ?? ?? ??"};
+constexpr Pattern RECORDING_STATE_SIG{"recording_state", "89 7B ?? 89 7B ?? 83 EF 01"};
+
 constexpr Pattern CHARACTER_JACK_SIG{
     "character_jack",
     "80 B9 ?? ?? ?? ?? 05 74 10 8B 81 ?? ?? ?? ?? 83 F8 0A 74 08 83 F8 77 74 03 32 C0 C3 B0 01 C3"};
 constexpr Pattern CHARACTER_ALISA_SIG{
     "character_alisa", "80 B9 ?? ?? ?? ?? 05 75 03 32 C0 C3 83 B9 ?? ?? ?? ?? 12 0F 94 C0 C3"};
-constexpr Pattern PLAYER_NATIVE_SIG{
-    "player_native",
-    "48 83 EC 28 48 63 02 4C 8B 01 83 F8 FF 74 2B 49 8B 50 ?? 48 8B C8 49 8B 40 ?? 48 2B C2 48 C1 "
-    "F8 03 48 3B C1 76 1B 48 8B 04 CA 48 85 C0 74 0B 48 05 ?? ?? ?? ?? 48 83 C4 28 C3 33 C0 48 83 "
-    "C4 28 C3 E8 ?? ?? ?? ?? CC"};
 
-constexpr Pattern REFLECTION_FIND_SIG{
-    "reflection_find",
-    "48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 40 "
-    "45 0F B6 F1 49 8B F0 48 8B FA 4C 8B F9 4D 85 C0 75 20 45 0F B6 C1 41 C0 EE 02 41 0F B6 D1 40 "
-    "88 71 ?? 41 80 E0 01 D0 EA 33 DB 48 89 19 E9 ?? ?? ?? ?? 33 DB 48 89 7D ?? 48 85 FF 74 0A 48 "
-    "8B 42 ?? 48 89 45 ?? EB 04 48 89 5D ?? 45 0F B6 EE C7 45 ?? FF FF FF FF 41 D0 ED 45 0F B6 E6 "
-    "41 80 E4 01 41 C0 EE 02 41 0F B6 C5 44 88 65 ?? 24 01 88 45 ?? 41 F6 C6 01 74 2C 48 85 FF 74 "
-    "27 E8 ?? ?? ?? ?? 48 8B 57 ?? 4C 8D 40 ?? 48 63 40 ?? 3B 42 ?? 7F 11 48 8B C8 C6 45 ?? 01 48 "
-    "8B 42 ?? 4C 39 04 C8 74 03 88 5D ?? 48 8D 4D ?? E8 ?? ?? ?? ?? 48 8B 45 ?? 48 85 C0 74 27 48 "
-    "8B 48 ?? 48 89 4D ?? 48 3B CE 74 45 48 8B 40 ?? 48 8D 4D ?? 48 89 45 ?? E8 ?? ?? ?? ?? 48 8B "
-    "45 ?? 48 85 C0 75 D9 41 88 5F ?? 41 0F B6 D5 49 89 1F 45 0F B6 C4 48 85 F6 0F 84 AE 00 00 00 "
-    "48 89 7D ?? 48 85 FF 74 23 48 8B 47 ?? 48 89 45 ?? EB 1D 41 88 5F ?? 41 0F B6 D5 49 89 07 45 "
-    "0F B6 C4 48 85 C0 74 D0 E9 ?? ?? ?? ?? 48 89 5D ?? 80 E2 01 C7 45 ?? FF FF FF FF 44 88 45 ?? "
-    "88 55 ?? 41 F6 C6 01 74 2C 48 85 FF 74 27 E8 ?? ?? ?? ?? 48 8B 57 ?? 4C 8D 40 ?? 48 63 40 ?? "
-    "3B 42 ?? 7F 11 48 8B C8 C6 45 ?? 01 48 8B 42 ?? 4C 39 04 C8 74 04 C6 45 ?? 00 48 8D 4D ?? E8 "
-    "?? ?? ?? ?? 48 8B 45 ?? 48 85 C0 74 25 48 39 70 ?? 74 1C 48 8B 40 ?? 48 8D 4D ?? 48 89 45 ?? "
-    "E8 ?? ?? ?? ?? 48 8B 45 ?? 48 85 C0 75 E0 EB 03 48 8B D8 C6 45 ?? 01 48 89 5D ?? 0F 10 45 ?? "
-    "41 0F 11 07 4C 8D 5C 24 ?? 49 8B C7 49 8B 5B ?? 49 8B 73 ?? 49 8B 7B ?? 49 8B E3 41 5F 41 5E "
-    "41 5D 41 5C 5D C3"};
-constexpr Pattern REFLECTION_NEXT_SIG{
-    "reflection_next",
-    "48 89 5C 24 ?? 57 48 83 EC 20 48 8B 11 48 8B F9 48 8B 59 ?? 48 85 D2 0F 84 AA 00 00 00 0F 1F "
-    "00 48 85 DB 74 44 66 66 66 0F 1F 84 00 ?? ?? 00 00 48 8B 43 ?? F6 80 ?? ?? ?? ?? 01 74 23 80 "
-    "7F ?? 00 0F 85 80 00 00 00 8B 80 ?? ?? ?? ?? 48 C1 E8 0F A8 01 74 72 8B 43 ?? 48 C1 E8 1D A8 "
-    "01 74 67 48 8B 5B ?? 48 85 DB 75 C7 80 7F ?? 00 74 2E 8B 47 ?? FF C0 89 47 ?? 3B 82 ?? ?? ?? "
-    "?? 7D 1E 48 63 C8 48 8B 82 ?? ?? ?? ?? 48 03 C9 48 8B 1C C8 48 85 DB 74 06 48 8B 5B ?? EB 85 "
-    "EB 83 80 7F ?? 00 74 24 48 8B 02 48 8B CA FF 90 ?? ?? ?? ?? 48 8B D0 48 85 C0 74 10 48 8B 58 "
-    "?? C7 47 ?? FF FF FF FF E9 ?? ?? ?? ?? 48 89 17 48 89 5F ?? 48 8B 5C 24 ?? 48 83 C4 20 5F C3"};
-constexpr Pattern REFLECTION_INVOKE_SIG{
-    "reflection_invoke",
-    "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 41 56 48 83 EC 20 48 8B 59 ?? 4D "
-    "8B F1 49 8B F8 48 8B F2 48 8B E9 E8 ?? ?? ?? ?? 48 85 C0 74 28 48 8D 50 ?? 48 63 40 ?? 3B 43 "
-    "?? 7F 1B 4C 8B C0 48 8B 43 ?? 4A 39 14 C0 75 0E 48 8B D3 48 8B CE E8 ?? ?? ?? ?? 48 8B F0 48 "
-    "8B 9F ?? ?? ?? ?? 4D 8B C6 48 8B D7 48 89 AF ?? ?? ?? ?? 48 8B CE FF 95 ?? ?? ?? ?? 48 8B 6C "
-    "24 ?? 48 8B 74 24 ?? 48 89 9F ?? ?? ?? ?? 48 8B 5C 24 ?? 48 8B 7C 24 ?? 48 83 C4 20 41 5E C3"};
-constexpr Pattern REFLECTION_STEP_SIG{
-    "reflection_step",
-    "41 8B 40 ?? 4D 8B C8 4C 8B D1 48 0F BA E0 08 73 29 48 8B 81 ?? ?? ?? ?? 4C 39 00 74 0C 0F 1F "
-    "00 48 8B 40 ?? 4C 39 08 75 F7 48 8B 48 ?? 49 89 4A ?? 49 C7 42 ?? 00 00 00 00 C3 4C 8B 41 ?? "
-    "49 63 41 ?? 49 03 C0 4C 89 41 ?? 48 89 41 ?? 49 8B C9 49 8B 01 48 FF A0 ?? ?? ?? ??"};
-constexpr Pattern RUNTIME_UPDATE_SIG{
-    "runtime_update",
-    "40 57 48 83 EC 30 80 79 ?? 00 48 8B F9 0F 29 74 24 ?? 0F 28 F1 0F 84 9C 00 00 00 48 8B 0D "
-    "?? ?? ?? ?? 48 85 C9 74 61 48 89 5C 24 ?? 8B 99 ?? ?? ?? ?? 85 DB 7E 4D FF CB 85 DB 7E 29 "
-    "F3 0F 10 0D ?? ?? ?? ?? 41 B0 01 E8 ?? ?? ?? ?? F3 0F 10 0D ?? ?? ?? ?? 41 B0 01 48 8B 0D "
-    "?? ?? ?? ?? E8 ?? ?? ?? ?? EB 11 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B "
-    "05 ?? ?? ?? ?? 89 98 ?? ?? ?? ?? 48 8B 5C 24 ?? 48 8B 0D ?? ?? ?? ?? 48 85 C9 74 0E 41 B8 "
-    "03 00 00 00 0F 28 CE E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 85 C9 74 05 E8 ?? ?? ?? ?? C6 "
-    "47 ?? 00 0F 28 74 24 ?? B0 01 48 83 C4 30 5F C3"};
-constexpr Pattern SCHEDULER_SIG{
-    "scheduler",
-    "4C 8B DC 57 48 81 EC 60 02 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 ?? ?? ?? ?? 80 "
-    "39 00 48 8B F9 0F 84 23 05 00 00 49 89 5B ?? 49 89 6B ?? 4D 89 7B ?? F3 0F 11 89 ?? ?? ?? "
-    "?? 45 85 C0 74 27 41 83 E8 01 74 19 41 83 E8 01 74 0B 41 83 F8 01 75 15 8B 69 ?? EB 13 8B "
-    "69 ?? 8B 59 ?? EB 14 8B 69 ?? 8B 59 ?? EB 0C 8B 69 ?? FF 81 ?? ?? ?? ?? 8B 59 ?? FF 15 ?? "
-    "?? ?? ?? 85 C0 74 0B 65 4C 8B 3C 25 ?? ?? ?? ?? EB 0B 33 C9 FF 15 ?? ?? ?? ?? 4C 8B F8 4D "
-    "85 FF 75 2A FF 15 ?? ?? ?? ?? 44 8B C0 48 8D 15 ?? ?? ?? ?? 48 8D 4C 24 ?? E8 ?? ?? ?? ?? "
-    "48 8D 4C 24 ?? FF 15 ?? ?? ?? ?? E9 ?? ?? ?? ?? 4C 89 A4 24 ?? ?? ?? ?? 4C 63 E3 4C 89 AC "
-    "24 ?? ?? ?? ?? 4C 63 ED 4C 89 64 24 ?? 4D 3B EC 0F 8D 33 04 00 00 48 89 B4 24 ?? ?? ?? ?? "
-    "4C 89 B4 24 ?? ?? ?? ?? 4E 8D 34 6D ?? ?? ?? ?? 4D 03 F5 4D 2B E5 4E 8D 34 F7 66 0F 1F 44 "
-    "00 ?? 89 AF ?? ?? ?? ?? 49 8B 0E 49 8B 5E ?? 48 8B C1 48 2B C3 48 A9 F8 FF FF FF 0F 84 6E "
-    "02 00 00 48 3B D9 0F 84 9C 00 00 00 48 8D 73 ?? 0F 1F 40 ?? 48 8B 03 80 78 ?? 00 75 7A 80 "
-    "78 ?? 00 74 24 48 8B 97 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 3B 97 ?? ?? ?? ?? 74 31 48 89 "
-    "02 48 83 87 ?? ?? ?? ?? 08 EB 2C 48 8B 97 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 3B 97 ?? ?? "
-    "?? ?? 74 0D 48 89 02 48 83 87 ?? ?? ?? ?? 08 EB 08 4C 8B C3 E8 ?? ?? ?? ?? 48 8B 03 80 78 "
-    "?? 00 74 1B C6 40 ?? 00 48 8B D6 4D 8B 06 48 8B CB 4C 2B C6 E8 ?? ?? ?? ?? 49 83 06 F8 EB "
-    "08 48 83 C3 08 48 83 C6 08 49 3B 1E 0F 85 6C FF FF FF 48 8B 87 ?? ?? ?? ?? 48 2B 87 ?? ?? "
-    "?? ?? 48 A9 F8 FF FF FF 0F 84 1C 01 00 00 C7 87 ?? ?? ?? ?? 00 00 00 00 48 8B B7 ?? ?? ?? "
-    "?? 48 8B 9F ?? ?? ?? ?? 48 3B DE 74 21 0F 1F 44 00 ?? 48 8B 0B 45 33 C0 48 8B 09 41 8D 50 "
-    "?? FF 15 ?? ?? ?? ?? 48 83 C3 08 48 3B DE 75 E4 48 8B B7 ?? ?? ?? ?? 48 8B 9F ?? ?? ?? ?? "
-    "48 8B C6 48 2B C3 48 A9 F8 FF FF FF 74 75 48 3B DE 74 59 0F 1F 00 48 8B 13 48 89 15 ?? ?? "
-    "?? ?? 80 7A ?? 00 75 3D 8B 87 ?? ?? ?? ?? 89 42 ?? 48 8B 42 ?? 48 85 C0 74 25 4C 89 78 ?? "
-    "48 8B 4A ?? 8B 41 ?? 83 F8 F2 7E 05 FF C8 89 41 ?? 85 C0 7F 12 48 8B 49 ?? FF 15 ?? ?? ?? "
-    "?? EB 06 48 8B CA FF 52 ?? 48 83 C3 08 48 3B DE 75 AA 48 8B 87 ?? ?? ?? ?? 48 3B 87 ?? ?? "
-    "?? ?? 74 07 48 89 87 ?? ?? ?? ?? 48 8B B7 ?? ?? ?? ?? 48 8B 9F ?? ?? ?? ?? 48 3B DE 74 1A "
-    "48 8B 0B BA FF FF FF FF 48 8B 09 FF 15 ?? ?? ?? ?? 48 83 C3 08 48 3B DE 75 E6 48 8B 87 ?? "
-    "?? ?? ?? 48 3B 87 ?? ?? ?? ?? 0F 84 9F 00 00 00 48 89 87 ?? ?? ?? ?? E9 ?? ?? ?? ?? 48 8B "
-    "B7 ?? ?? ?? ?? 48 8B 9F ?? ?? ?? ?? 48 8B C6 48 2B C3 48 A9 F8 FF FF FF 74 77 48 3B DE 74 "
-    "5B 0F 1F 44 00 ?? 48 8B 13 48 89 15 ?? ?? ?? ?? 80 7A ?? 00 75 3D 8B 87 ?? ?? ?? ?? 89 42 "
-    "?? 48 8B 42 ?? 48 85 C0 74 25 4C 89 78 ?? 48 8B 4A ?? 8B 41 ?? 83 F8 F2 7E 05 FF C8 89 41 "
-    "?? 85 C0 7F 12 48 8B 49 ?? FF 15 ?? ?? ?? ?? EB 06 48 8B CA FF 52 ?? 48 83 C3 08 48 3B DE "
-    "75 AA 48 8B 87 ?? ?? ?? ?? 48 3B 87 ?? ?? ?? ?? 74 07 48 89 87 ?? ?? ?? ?? FF C5 49 83 C6 "
-    "18 49 83 EC 01 0F 85 63 FD FF FF 48 8B 74 24 ?? 4E 8D 34 6D ?? ?? ?? ?? 8B 47 ?? 4D 03 F5 "
-    "49 2B F5 89 87 ?? ?? ?? ?? 48 89 74 24 ?? 4E 8D 34 F7 49 8B 2E 49 8B 5E ?? 48 8B C5 48 2B "
-    "C3 48 A9 F8 FF FF FF 0F 84 0B 01 00 00 48 3B DD 0F 84 FA 00 00 00 48 8B 3B 80 7F ?? 00 75 "
-    "0B 48 83 C3 08 48 3B DD 75 EE EB 53 80 7F ?? 00 75 34 48 8B 47 ?? 48 85 C0 74 2B 4C 89 78 "
-    "?? 48 8B 47 ?? 44 89 60 ?? 48 8B 4F ?? 8B 41 ?? 83 F8 F2 7E 05 FF C8 89 41 ?? 85 C0 7F 0A "
-    "48 8B 49 ?? FF 15 ?? ?? ?? ?? 48 8B 47 ?? 48 85 C0 74 03 4C 89 20 48 8B 07 BA 01 00 00 00 "
-    "48 8B CF FF 10 48 3B DD 0F 84 8A 00 00 00 48 8D 73 ?? 48 3B F5 0F 84 78 00 00 00 48 8B 3E "
-    "80 7F ?? 00 74 5C 80 7F ?? 00 75 37 48 8B 47 ?? 48 85 C0 74 2E 4C 89 78 ?? 48 8B 47 ?? C7 "
-    "40 ?? 00 00 00 00 48 8B 4F ?? 8B 41 ?? 83 F8 F2 7E 05 FF C8 89 41 ?? 85 C0 7F 0A 48 8B 49 "
-    "?? FF 15 ?? ?? ?? ?? 48 8B 47 ?? 48 85 C0 74 07 48 C7 00 00 00 00 00 48 8B 07 BA 01 00 00 "
-    "00 48 8B CF FF 10 EB 07 48 89 3B 48 83 C3 08 48 83 C6 08 48 3B F5 75 8B 45 33 E4 48 8B 74 "
-    "24 ?? 49 3B 1E 74 03 49 89 1E 49 83 C6 18 48 83 EE 01 48 89 74 24 ?? 0F 85 C9 FE FF FF 4C "
-    "8B B4 24 ?? ?? ?? ?? 48 8B B4 24 ?? ?? ?? ?? EB 09 8B 47 ?? 89 87 ?? ?? ?? ?? 4C 8B AC 24 "
-    "?? ?? ?? ?? 4C 8B A4 24 ?? ?? ?? ?? 48 8B AC 24 ?? ?? ?? ?? 48 8B 9C 24 ?? ?? ?? ?? 4C 8B "
-    "BC 24 ?? ?? ?? ?? 48 8B 8C 24 ?? ?? ?? ?? 48 33 CC E8 ?? ?? ?? ?? 48 81 C4 60 02 00 00 5F "
-    "C3"};
+constexpr Pattern REFLECTION_FIND_SIG{"reflection_field_iteration",
+                                      "48 8B 48 ?? 48 89 4D ?? 48 3B CE"};
+constexpr Pattern REFLECTION_INVOKE_SIG{"native_invoke",
+                                        "4D 8B C6 48 8B D7 48 89 AF ?? ?? ?? ?? 48 8B CE FF 95"};
+constexpr Pattern REFLECTION_STEP_SIG{"reflection_step",
+                                      "41 8B 40 ?? 4D 8B C8 4C 8B D1 48 0F BA E0 08"};
+// Identify the phase-3 call site, then validate its owning function and callee.
+// Prologue, timeout bookkeeping and unrelated scheduler implementation are not anchors.
+constexpr Pattern RUNTIME_UPDATE_SIG{"runtime_update_call",
+                                     "41 B8 03 00 00 00 0F 28 CE E8 ?? ?? ?? ??"};
 constexpr Pattern THREAD_ID_SIG{
-    "thread_id",
-    "FF 15 ?? ?? ?? ?? 49 8B CC 44 88 35 ?? ?? ?? ?? 89 05 ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? "
-    "?? ??"};
+    "thread_id", "FF 15 ?? ?? ?? ?? 49 8B CC 44 88 35 ?? ?? ?? ?? 89 05 ?? ?? ?? ??"};
 constexpr Pattern ENGINE_FREE_SIG{
     "engine_free",
     "48 85 C9 74 2E 53 48 83 EC 20 48 8B D9 48 8B 0D ?? ?? ?? ?? 48 85 C9 75 0C E8 ?? ?? ?? ?? "
@@ -291,158 +140,27 @@ constexpr Pattern WEAK_GET_SIG{
     "40 48 8B 04 D3 48 8D 14 C8 48 85 D2 74 2F 44 39 52 ?? 75 29 41 8B 01 41 3B C3 7D 15 8B D0 "
     "0F B7 C0 48 C1 EA 10 48 8D 0C 40 48 8B 04 D3 4C 8D 04 C8 49 8B 00 48 8B 1C 24 48 83 C4 08 "
     "C3 48 8B 1C 24 49 8B C0 48 83 C4 08 C3 49 8B C0 48 83 C4 08 C3"};
-constexpr Pattern OBJECT_ENUM_SIG{
-    "object_enum",
-    "48 83 EC 48 48 8D 44 24 ?? 48 89 54 24 ?? 48 89 44 24 ?? 48 8D 54 24 ?? 48 8D 05 ?? ?? ?? ?? "
-    "48 89 44 24 ?? 8B 44 24 ?? 89 44 24 ?? E8 ?? ?? ?? ?? 48 83 C4 48 C3"};
-constexpr Pattern OBJECT_APPEND_SIG{
-    "object_append",
-    "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC 20 48 8B 19 48 8B 32 48 63 7B 08 8D 47 ?? 89 43 08 "
-    "3B 43 0C 76 0A 8B D7 48 8B CB E8 ?? ?? ?? ?? 48 8B 03 48 8B 5C 24 ?? 48 89 34 F8 48 8B 74 24 "
-    "?? 48 83 C4 20 5F C3"};
-constexpr Pattern RAW_TEXT_EXEC_SIG{
-    "raw_text_exec",
-    "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC 30 48 8B DA 48 8B F1 0F 57 C0 0F 11 44 24 ?? 33 FF "
-    "48 89 7C 24 ?? 48 89 7C 24 ?? E8 ?? ?? ?? ?? 48 8B CB 48 39 7B ?? 74 10 4C 8D 44 24 ?? 48 8B "
-    "53 ?? E8 ?? ?? ?? ?? EB 1C 4C 8B 83 ?? ?? ?? ?? 49 8B 40 ?? 48 89 83 ?? ?? ?? ?? 48 8D 54 24 "
-    "?? E8 ?? ?? ?? ?? 89 7C 24 ?? E8 ?? ?? ?? ?? 48 8B CB 48 83 7B ?? 00 74 10 4C 8D 44 24 ?? 48 "
-    "8B 53 ?? E8 ?? ?? ?? ?? EB 1C 4C 8B 83 ?? ?? ?? ?? 49 8B 40 ?? 48 89 83 ?? ?? ?? ?? 48 8D 54 "
-    "24 ?? E8 ?? ?? ?? ?? 83 7C 24 ?? 00 41 0F 95 C0 48 8B 43 ?? 48 85 C0 40 0F 95 C7 48 03 F8 48 "
-    "89 7B ?? 48 8D 54 24 ?? 48 8B CE E8 ?? ?? ?? ?? 90 48 8B 4C 24 ?? 48 85 C9 74 06 E8 ?? ?? ?? "
-    "?? 90 48 8B 5C 24 ?? 48 8B 74 24 ?? 48 83 C4 30 5F C3"};
-constexpr Pattern FSTRING_COPY_SIG{
-    "fstring_copy",
-    "48 89 5C 24 ?? 48 89 74 24 ?? 55 57 41 54 41 56 41 57 48 8B EC 48 83 EC 60 45 0F B6 F0 48 8B "
-    "F2 48 8B F9 45 33 E4 48 8D 45 ?? 48 89 45 ?? 4C 89 65 ?? 48 63 5A 08 4C 8B 3A 89 5D ?? 85 DB "
-    "75 06 44 89 65 ?? EB 21 45 33 C0 8B D3 48 8D 4D ?? E8 ?? ?? ?? ?? 4C 8B C3 4D 03 C0 49 8B D7 "
-    "48 8B 4D ?? E8 ?? ?? ?? ?? 90"};
-constexpr Pattern FSTRING_RESIZE_SIG{
-    "fstring_resize",
-    "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC 20 48 63 DA 41 8B F0 48 8B F9 85 D2 74 1F 48 8B CB "
-    "BA 02 00 00 00 48 03 C9 E8 ?? ?? ?? ?? 48 D1 E8 B9 FF FF FF 7F 3B D8 0F 4F C1 8B D8 3B DE 7E "
-    "33 48 8B 0F 48 85 C9 75 04 85 DB 74 14 48 63 D3 41 B8 02 00 00 00 48 03 D2 E8 ?? ?? ?? ?? 48 "
-    "89 07 89 5F 0C 48 8B 5C 24 ?? 48 8B 74 24 ?? 48 83 C4 20 5F C3 89 77 0C 48 8B 5C 24 ?? 48 8B "
-    "74 24 ?? 48 83 C4 20 5F C3"};
-constexpr Pattern EVENT_PARMS_SIG{"event_parms",
-                                  "0F B7 8E ?? ?? ?? ?? 33 D2 44 2B C1 48 03 CF 4D 63 C0 E8 ?? ?? "
-                                  "?? ?? 44 0F B7 86 ?? ?? ?? ?? 49 8B D4 48 8B CF E8 ?? ?? ?? ??"};
-constexpr Pattern PROCESS_EVENT_SIG{
-    "process_event",
-    "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 10 01 00 00 48 8D 6C 24 ?? 48 89 9D ?? ?? ?? ?? "
-    "48 8B 05 ?? ?? ?? ?? 48 33 C5 48 89 85 ?? ?? ?? ?? 4D 8B E0 48 8B F2 4C 8B F9 48 85 C9 0F 84 "
-    "CF 03 00 00 F7 41 ?? 00 00 00 60 0F 85 C2 03 00 00 45 33 F6 F7 82 ?? ?? ?? ?? 00 04 00 00 74 "
-    "32 48 8B 01 45 33 C0 FF 90 ?? ?? ?? ?? 8B D8"};
-constexpr Pattern NAME_DECODE_SIG{
-    "name_decode",
-    "48 89 5C 24 ?? 57 48 83 EC 20 80 3D ?? ?? ?? ?? 00 48 8B FA 8B 19 74 09 4C 8D 05 ?? ?? ?? ?? "
-    "EB 16 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B C0 C6 05 ?? ?? ?? ?? 01 8B CB 0F B7 C3 C1 E9 "
-    "10 89 4C 24 ?? 89 44 24 ?? 48 8B 44 24 ?? 48 C1 E8 20 8D 1C 00 49 03 5C C8 ?? 48 8B CF 44 0F "
-    "B7 03 48 8D 53 ?? 49 C1 E8 06 E8 ?? ?? ?? ?? 0F B7 03 48 8B 5C 24 ?? 48 C1 E8 06 C6 04 38 00 "
-    "48 83 C4 20 5F C3"};
+constexpr Pattern PROCESS_EVENT_SIG{"process_event",
+                                    "F7 41 ?? 00 00 00 60 0F 85 ?? ?? ?? ?? 45 33 F6 F7 82"};
+constexpr Pattern NAME_DECODE_SIG{"name_decoder", "8B CB 0F B7 C3 C1 E9 10"};
 
-constexpr Pattern SESSION_FINALIZE_SIG{
-    "session_finalize",
-    "40 57 48 83 EC 20 F7 01 ?? ?? ?? ?? 48 8B F9 75 08 32 C0 48 83 C4 20 5F "
-    "C3 48 89 5C 24 30 C7 81 ?? ?? ?? ?? 00 00 00 00 E8 ?? ?? ?? ?? 48 8D 15 "
-    "?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 8B D8 E8 ?? ?? ?? ?? 48 8D 15 ?? "
-    "?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 0F BE 88 ?? ?? ?? ?? 48 8B 03 83 F1 01 "
-    "48 8B 5C 24 30 83 F9 FF 74 28 48 8B 50 08 48 8B 40 10 48 2B C2 48 63 C9 "
-    "48 C1 F8 03 48 3B C1 76 2B 48 8B 04 CA 48 85 C0 74 08 48 05 ?? ?? ?? ?? "
-    "EB 05 B8 ?? ?? ?? ?? C7 00 01 00 00 00 B0 01 C6 87 ?? ?? ?? ?? 00 48 83 "
-    "C4 20 5F C3"};
+constexpr Pattern SESSION_FINALIZE_SIG{"session_finalizer",
+                                       "C7 00 01 00 00 00 B0 01 C6 87 ?? ?? ?? ?? 00"};
 
-SessionLayout decode_session_layout(const std::uint8_t* code, std::size_t size) {
-    if (!code || size < 172) return {};
-    auto field = [code](std::size_t offset) {
-        std::uint32_t value = 0;
-        std::memcpy(&value, code + offset, 4);
-        return value;
-    };
-    SessionLayout layout{field(32), field(147), field(161), field(8)};
-    // The native array and holder use different pointer bases; decode their delta.
-    // Reject an unexpected pointer relationship rather than guessing a field.
-    if (!layout.active_mask || (layout.active_mask & (layout.active_mask - 1)) ||
-        field(140) < layout.player_flag || field(140) - layout.player_flag < 8 ||
-        field(140) - layout.player_flag > 0x1000 || (field(140) - layout.player_flag) % 8 ||
-        layout.pending < 4 || layout.pending > 0x1000 || layout.pending % 4 ||
-        layout.player_flag < 0x100 || layout.player_flag > 0x10000 || layout.player_flag % 4 ||
-        layout.finished < 4 || layout.finished > 0x1000 ||
-        (layout.finished >= layout.pending && layout.finished < layout.pending + 4))
-        return {};
-    return layout;
-}
+constexpr Pattern PRACTICE_DTOR_SIG{"practice_teardown",
+                                    "48 8B CF E8 ?? ?? ?? ?? 33 FF 48 89 3D ?? ?? ?? ??"};
 
-constexpr Pattern PRACTICE_DTOR_SIG{
-    "practice_dtor",
-    // FUN at RVA 0x5C8C880 in v3.00.02. MSVC dtor pattern: saves
-    // rbx/rsi/rdi, stores vtable ptr (lea rax,[rip+vtable]; mov [rcx],rax),
-    // then loads a global singleton ptr.
-    "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 8B F2 48 8B D9 "
-    "48 8D 05 ?? ?? ?? ?? 48 89 01 "
-    "48 8B 0D ?? ?? ?? ?? "
-    "48 85 C9 74 08 48 8B 01 33 D2 FF 50 ??"};
+constexpr Pattern PLAYER_REFRESH_SIG{"player_refresh_fields", "33 C0 48 83 7B ?? 00 48 89 43 ??"};
 
-constexpr Pattern PLAYER_REFRESH_SIG{
-    "player_refresh",
-    // FUN at RVA 0x5E70CD0 in v3.00.02. Two impostors share the prologue:
-    //   - FUN_145E70B40 (the analyzed-by-Ghidra sibling) saves an extra
-    //     register at the top, so its first 6 bytes differ — already
-    //     excluded by `48 89 5C 24 18 57`.
-    //   - FUN_145261320 has an IDENTICAL prologue + same `mov ecx, 0x6BC`
-    //     magic + same `cmp [rip+_], eax ; jg` — but immediately after
-    //     the jg, the impostor does another mov+cmp+jg (`8B 07 39 05`)
-    //     while the target does a `mov eax, [rip+_] ; mov [rsp+0x30], eax`
-    //     (`8B 05 ?? ?? ?? ?? 89 44 24 30`). That post-jg shape is the
-    //     unique discriminator.
-    //
-    //   mov [rsp+0x18], rbx ; push rdi ; sub rsp, 0x20
-    //   mov rax, gs:[0x58]                              ; TIB
-    //   mov rbx, rcx                                    ; this
-    //   mov edx, [rip+TLS_INDEX]                        ; wildcarded
-    //   mov ecx, <TLS displacement>                     ; wildcarded
-    //   mov rdi, [rax+rdx*8] ; add rdi, rcx             ; resolve TLS slot
-    //   mov eax, [rdi]                                  ; load slot value
-    //   cmp [rip+GUARD], eax                            ; wildcarded
-    //   jg <long>                                       ; 0F 8F + 32-bit disp
-    //   mov eax, [rip+_] ; mov [rsp+0x30], eax          ; unique to target
-    "48 89 5C 24 18 57 48 83 EC 20 "
-    "65 48 8B 04 25 58 00 00 00 "
-    "48 8B D9 "
-    "8B 15 ?? ?? ?? ?? "
-    "B9 ?? ?? ?? ?? "
-    "48 8B 3C D0 48 03 F9 "
-    "8B 07 39 05 ?? ?? ?? ?? "
-    "0F 8F ?? ?? ?? ?? "
-    "8B 05 ?? ?? ?? ?? "
-    "89 44 24 30"};
-
-constexpr Pattern POOL_INIT_SIG{
-    "pool_init",
-    "48 83 EC 28 33 C0 48 89 41 ?? 48 39 05 ?? ?? ?? ?? 75 39 B9 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B "
-    "0D ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 85 C9 74 0C E8 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 33 D2 "
-    "41 B8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 83 3D ?? ?? ?? ?? 00 75 3D B9 ?? ?? ?? ?? E8 ?? "
-    "?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 85 C9 74 0C E8 ?? ?? ?? ?? 48 8B 05 ?? "
-    "?? ?? ?? 33 D2 41 B8 ?? ?? ?? ?? 48 8B C8 48 83 C4 28 E9 ?? ?? ?? ?? 48 83 C4 28 C3"};
-constexpr Pattern POOL_CONSUMER_SIG{
-    "pool_consumer",
-    "48 63 47 ?? 48 69 C8 22 1C 00 00 48 03 0D ?? ?? ?? ?? 0F B7 11 48 8D 59 02 EB 1A 48 8B 47 ?? "
-    "48 8B 88 ?? ?? ?? ?? 48 8B C5 48 03 C0 48 8B 5C C1 ?? 0F B7 14 C1 4C 89 74 24 58 4C 63 74 EF "
-    "?? 4C 89 7C 24 60 45 33 FF 42 0F B6 4C B3 03 3B 4C EF ?? 77 1F 44 89 7C EF ?? FF 44 EF ?? 44 "
-    "8B 74 EF ?? 0F B7 C2 44 3B F0 72 09 C6 47 ?? 01 E9 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? E8 ?? ?? "
-    "?? ?? 83 78 ?? 04 75 42 48 8B 8E ?? ?? ?? ?? 48 85 C9 74 36 48 81 C1 ?? ?? ?? ?? E8 ?? ?? ?? "
-    "?? 4C 8B C0 B8 BF BF 8C 82 41 F7 E0 C1 EA 07 69 CA FB 00 00 00 44 2B C1 49 63 CE 0F B6 54 8B "
-    "02 41 3B D0 74 06 66 C7 47 ?? 01 01 49 63 C6 48 8D 0C 83 0F B7 04 83 25 DF FF 00 00 41 89 45 "
-    "?? 0F B6 01 C0 E8 05 24 01 41 88 04 24"};
-constexpr Pattern POOL_COPY_SIG{
-    "pool_copy",
-    "48 63 4F ?? 4C 63 C3 49 03 C8 48 69 C9 ?? ?? ?? ?? 49 8D 40 ?? 41 B8 ?? ?? ?? ?? 48 03 0D ?? "
-    "?? ?? ?? 48 69 D0 ?? ?? ?? ?? 48 03 15 ?? ?? ?? ?? E8 ?? ?? ?? ??"};
+constexpr Pattern POOL_INIT_SIG{"pool_allocator",
+                                "33 D2 41 B8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 83 3D"};
+constexpr Pattern POOL_CONSUMER_SIG{"recording_consumer",
+                                    "48 69 C8 ?? ?? ?? ?? 48 03 0D ?? ?? ?? ?? 0F B7 11"};
+constexpr Pattern POOL_COPY_SIG{"recording_copy",
+                                "49 03 C8 48 69 C9 ?? ?? ?? ?? 49 8D 40 ?? 41 B8"};
 
 // Follow the movelist wrapper's actual subsystem accessor. This identifies the
 // context getter by its caller and table-lookup target, without neighboring stubs.
-constexpr Pattern RECORD_POOL_ACCESSOR_SIG{
-    "record_pool_accessor",
-    "48 83 EC 28 E8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8B C8 48 83 C4 28 E9 ?? ?? ?? ??"};
 constexpr Pattern GET_CTX_SIG{"get_ctx", "48 8B 05 ?? ?? ?? ?? C3"};
 
 // --- Pattern decode + scanner ----------------------------------------------
@@ -588,81 +306,615 @@ std::uintptr_t decode_rip32(std::uintptr_t instr_addr, std::size_t disp_off,
     return instr_addr + instr_len + static_cast<std::intptr_t>(disp);
 }
 
-// Resolve a RIP-relative data reference inside a previously-resolved
-// function. `func_addr` is the function start, `scan_window` is how far
-// in to search, the pattern matches the instruction shape, and
-// disp_off/instr_len describe how to decode the disp32.
-//
-// Returns the absolute target address, or 0 if the pattern wasn't found.
-std::uintptr_t resolve_data_ref(const char* label, std::uintptr_t func_addr,
-                                std::size_t scan_window, const char* pattern_notation,
-                                std::size_t disp_off, std::size_t instr_len) {
-    if (!func_addr) return 0;
-    PatternByte buf[32];
-    auto n = decode_pattern(pattern_notation, buf, std::size(buf));
-    if (n == 0) {
-        OPENDOJO_LOG("signatures: %s — pattern decode failed", label);
-        return 0;
-    }
-    DWORD64 image_base = 0;
-    const auto function = RtlLookupFunctionEntry(func_addr, &image_base, nullptr);
-    if (!function || image_base + function->BeginAddress != func_addr ||
-        function->EndAddress <= function->BeginAddress) {
-        OPENDOJO_LOG("signatures: %s has no matching unwind function boundary", label);
-        return 0;
-    }
-    const auto function_size = function->EndAddress - function->BeginAddress;
-    if (scan_window > function_size) scan_window = function_size;
-    auto bytes = reinterpret_cast<const std::uint8_t*>(func_addr);
-    const auto text = find_text_section();
-    if (func_addr < text.start || func_addr - text.start >= text.size ||
-        scan_window > text.size - (func_addr - text.start))
-        return 0;
-    const auto match = scan_unique(bytes, scan_window, buf, n);
-    if (match.hit_count != 1) {
-        OPENDOJO_LOG("signatures: %s — xref instruction missing or ambiguous in %s body", label,
-                     "resolved function");
-        return 0;
-    }
-    auto target = decode_rip32(match.addr, disp_off, instr_len);
-    if (!memory::is_image_data(target, sizeof(std::uintptr_t))) {
-        OPENDOJO_LOG("signatures: %s rejected target outside writable image data", label);
-        return 0;
-    }
-    OPENDOJO_LOG("signatures: %s -> 0x%llX", label, static_cast<unsigned long long>(target));
-    return target;
-}
-
-bool scan_one(const Pattern& sig, const std::uint8_t* text, std::size_t size,
-              std::atomic<std::uintptr_t>& out) {
-    PatternByte buf[2048];
-    auto n = decode_pattern(sig.notation, buf, std::size(buf));
-    if (n == 0) {
-        OPENDOJO_LOG("signatures: %s — pattern decode failed (check notation)", sig.name);
-        return false;
-    }
-    auto r = scan_unique(text, size, buf, n);
-    if (r.hit_count == 0) {
-        OPENDOJO_LOG("signatures: %s — NOT FOUND (Tekken patched the function body)", sig.name);
-        return false;
-    }
-    if (r.hit_count > 1) {
-        OPENDOJO_LOG("signatures: %s — AMBIGUOUS (>=%d matches; pattern needs more bytes)",
-                     sig.name, r.hit_count);
-        return false;
-    }
-    DWORD64 image_base = 0;
-    const auto function = RtlLookupFunctionEntry(r.addr, &image_base, nullptr);
-    if (!function || image_base + function->BeginAddress != r.addr) {
-        OPENDOJO_LOG("signatures: %s match is not an unwind function entry", sig.name);
-        return false;
-    }
-    out.store(r.addr, std::memory_order_release);
-    OPENDOJO_LOG("signatures: %s -> 0x%llX", sig.name, static_cast<unsigned long long>(r.addr));
-    return true;
-}
-
 }  // namespace
+
+static native_scan::Image code_image() {
+    const auto base = memory::polaris_base();
+    const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    const auto text = find_text_section();
+    return {base, text.start, text.start + text.size, base + nt->OptionalHeader.SizeOfImage};
+}
+
+static bool imported_api(const native_scan::Instruction& call, std::uintptr_t expected) {
+    const auto& i = call.decoded;
+    if (i.opcode != 0xff || i.modrm_reg != 2 || !call.rip()) return false;
+    std::uintptr_t target = 0;
+    return code_image().contains(call.rip(), sizeof(target)) &&
+           read_pointer_guarded(call.rip(), target) && target == expected;
+}
+
+static RuntimeLayout update_at(const native_scan::Function& wrapper) {
+    using namespace native_scan;
+    const auto image = code_image();
+    const auto finish =
+        unique(wrapper,
+               "48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? 41 B8 03 00 00 00 0F 28 CE E8 ?? ?? ?? ?? "
+               "48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? E8 ?? ?? ?? ?? C6 47 ?? 00 "
+               "0F 28 74 24 ?? B0 01 48 83 C4 ?? 5F C3");
+    const auto active = unique(wrapper, "80 79 ?? 00 48 8B F9");
+    if (!finish || !active || finish[2].relative() != finish[6].address ||
+        finish[8].relative() != finish[10].address ||
+        active[0].displacement() != finish[10].displacement() ||
+        !memory::is_image_data(finish[0].rip(), 8) || !memory::is_image_data(finish[6].rip(), 8) ||
+        finish[0].rip() == finish[6].rip() || !image.code(finish[9].relative()))
+        return {};
+    const auto scheduler = function(image, finish[5].relative());
+    if (!scheduler || scheduler.begin != finish[5].relative()) return {};
+    // No second call to this scheduler may bypass the validated completion tail.
+    for (const auto& instruction : wrapper.instructions)
+        if (instruction.decoded.opcode == 0xe8 && instruction.relative() == scheduler.begin &&
+            instruction.address != finish[5].address)
+            return {};
+
+    const auto release = unique(scheduler,
+                                "48 8B B7 ?? ?? ?? ?? 48 8B 9F ?? ?? ?? ?? 48 3B DE 74 ?? "
+                                "48 8B 0B 45 33 C0 48 8B 09 41 8D 50 01 FF 15 ?? ?? ?? ?? "
+                                "48 83 C3 08 48 3B DE 75 ??");
+    const auto wait = unique(scheduler,
+                             "48 8B B7 ?? ?? ?? ?? 48 8B 9F ?? ?? ?? ?? 48 3B DE 74 ?? "
+                             "48 8B 0B BA FF FF FF FF 48 8B 09 FF 15 ?? ?? ?? ?? "
+                             "48 83 C3 08 48 3B DE 75 ??");
+    if (!release || !wait || release[0].address >= wait[0].address ||
+        release[11].relative() != release[4].address ||
+        release[3].relative() != release[11].address + release[11].decoded.len ||
+        wait[10].relative() != wait[4].address ||
+        wait[3].relative() != wait[10].address + wait[10].decoded.len ||
+        release[0].displacement() != release[1].displacement() + 8 ||
+        wait[0].displacement() != wait[1].displacement() + 8 ||
+        !imported_api(release[8], reinterpret_cast<std::uintptr_t>(&ReleaseSemaphore)) ||
+        !imported_api(wait[7], reinterpret_cast<std::uintptr_t>(&WaitForSingleObject)))
+        return {};
+    bool fiber_between = false;
+    for (const auto& instruction : scheduler.instructions) {
+        if (instruction.address > release[11].address && instruction.address < wait[0].address &&
+            imported_api(instruction, reinterpret_cast<std::uintptr_t>(&SwitchToFiber)))
+            fiber_between = true;
+        // A return inserted between dispatch and join invalidates the boundary.
+        if (instruction.address > release[0].address && instruction.address < wait[10].address &&
+            (instruction.decoded.opcode == 0xc3 || instruction.decoded.opcode == 0xc2))
+            return {};
+    }
+    if (!fiber_between || !reaches_before_exit(scheduler, release[0].address, wait[0].address))
+        return {};
+    RuntimeLayout result;
+    result.update = wrapper.begin;
+    result.scheduler = scheduler.begin;
+    result.scheduler_slot = finish[0].rip();
+    return result;
+}
+
+static ReflectionLayout reflection_fields_at(const native_scan::Function& find) {
+    using namespace native_scan;
+    const auto image = code_image();
+    const auto properties = unique(find, "48 8B 42 ?? 48 89 45 ?? EB ?? 48 89 5D ??");
+    const auto children = unique(find, "48 85 FF 74 ?? 48 8B 47 ?? 48 89 45 ?? EB ??");
+    const auto fields = unique(find,
+                               "48 8B 48 ?? 48 89 4D ?? 48 3B CE 74 ?? 48 8B 40 ?? 48 8D 4D ?? "
+                               "48 89 45 ?? E8 ?? ?? ?? ?? 48 8B 45 ?? 48 85 C0 75 ??");
+    const auto objects =
+        unique(find,
+               "48 39 70 ?? 74 ?? 48 8B 40 ?? 48 8D 4D ?? 48 89 45 ?? E8 ?? ?? ?? ?? "
+               "48 8B 45 ?? 48 85 C0 75 ??");
+    if (!properties || !children || !fields || !objects ||
+        properties[1].displacement() != fields[8].displacement() ||
+        children[3].displacement() != objects[6].displacement() ||
+        fields[10].relative() != fields[0].address || objects[8].relative() != objects[0].address ||
+        !image.code(fields[7].relative()))
+        return {};
+    const auto next = function(image, objects[5].relative());
+    if (!next || next.begin != objects[5].relative()) return {};
+    const auto klass = unique(next, "48 8B 43 ?? F6 80 ?? ?? ?? ?? 01 74 ??");
+    const auto link = unique(next, "48 8B 5B ?? 48 85 DB 75 ??");
+    const auto nested = unique(next, "48 8B 1C C8 48 85 DB 74 ?? 48 8B 5B ?? EB ??");
+    const auto parent = unique(next,
+                               "48 8B 02 48 8B CA FF 90 ?? ?? ?? ?? 48 8B D0 48 85 C0 74 ?? "
+                               "48 8B 58 ?? C7 47 ?? FF FF FF FF E9 ?? ?? ?? ??");
+    if (!klass || !link || !nested || !parent ||
+        link[0].displacement() != objects[2].displacement() ||
+        nested[3].displacement() != children[2].displacement() ||
+        parent[6].displacement() != children[2].displacement() ||
+        link[2].relative() != klass[0].address)
+        return {};
+    // The two class checks in the finder must agree with its iterator's class field.
+    unsigned class_checks = 0;
+    for (const auto& instruction : find.instructions) {
+        const auto& d = instruction.decoded;
+        if (d.rex == 0x48 && d.opcode == 0x8b && d.modrm == 0x57) {
+            if (instruction.displacement() != klass[0].displacement()) return {};
+            ++class_checks;
+        }
+    }
+    if (class_checks != 2) return {};
+    ReflectionLayout result;
+    result.object_class = klass[0].displacement();
+    result.object_name = objects[0].displacement();
+    result.children = children[2].displacement();
+    result.child_properties = properties[0].displacement();
+    result.field_next = link[0].displacement();
+    result.ffield_name = fields[0].displacement();
+    result.ffield_next = fields[4].displacement();
+    result.super_getter_slot = parent[2].displacement();
+    return result;
+}
+
+// Short anchors may match more than one function. Validate every bounded candidate;
+// accept exactly one semantic match, never the first byte hit.
+static std::vector<std::uintptr_t> candidates(const Pattern& pattern, const std::uint8_t* text,
+                                              std::size_t size) {
+    PatternByte bytes[256];
+    const auto count = decode_pattern(pattern.notation, bytes, std::size(bytes));
+    std::vector<std::uintptr_t> result;
+    if (!count || count > size || bytes[0] == WILD) return result;
+    for (std::size_t at = 0; at <= size - count; ++at) {
+        const auto hit = static_cast<const std::uint8_t*>(
+            std::memchr(text + at, bytes[0], size - count - at + 1));
+        if (!hit) break;
+        at = hit - text;
+        if (match_at(hit, bytes, count)) {
+            if (result.size() == 64) {
+                OPENDOJO_LOG("signatures: %s anchor exceeded candidate limit", pattern.name);
+                return {};
+            }
+            result.push_back(reinterpret_cast<std::uintptr_t>(hit));
+        }
+    }
+    return result;
+}
+static RuntimeLayout discover_update(const std::uint8_t* text, std::size_t size) {
+    RuntimeLayout result;
+    for (const auto anchor : candidates(RUNTIME_UPDATE_SIG, text, size)) {
+        const auto fn = native_scan::function(code_image(), anchor);
+        if (!fn || fn.begin == result.update) continue;
+        const auto layout = update_at(fn);
+        if (!layout.update) continue;
+        if (result.update) return {};
+        result = layout;
+    }
+    return result;
+}
+
+static ReflectionLayout discover_reflection_fields(const std::uint8_t* text, std::size_t size) {
+    ReflectionLayout result;
+    std::uintptr_t owner = 0;
+    for (const auto anchor : candidates(REFLECTION_FIND_SIG, text, size)) {
+        const auto fn = native_scan::function(code_image(), anchor);
+        if (!fn || fn.begin == owner) continue;
+        const auto fields = reflection_fields_at(fn);
+        if (!fields.object_class) continue;
+        if (owner) return {};
+        result = fields;
+        owner = fn.begin;
+    }
+    return result;
+}
+
+// Identification anchors are separate from the contracts validated in each candidate.
+// Actual operands/call targets come from decoded instructions, not function+byte offsets.
+template <class T, class Validate>
+static std::optional<T> discover(const Pattern& anchor, const std::uint8_t* text, std::size_t size,
+                                 Validate validate) {
+    std::optional<T> result;
+    std::uintptr_t owner = 0;
+    for (const auto hit : candidates(anchor, text, size)) {
+        const auto fn = native_scan::function(code_image(), hit);
+        if (!fn || fn.begin == owner) continue;
+        auto found = validate(fn);
+        if (!found) continue;
+        if (result) {
+            OPENDOJO_LOG("signatures: %s has multiple validated candidates", anchor.name);
+            return {};
+        }
+        result = std::move(found);
+        owner = fn.begin;
+    }
+    if (!result) OPENDOJO_LOG("signatures: %s instruction contract unavailable", anchor.name);
+    return result;
+}
+struct PracticeDiscovery {
+    std::uintptr_t address, slot;
+};
+static std::optional<PracticeDiscovery> practice_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto identity = unique(fn, "48 8D 05 ?? ?? ?? ?? 48 89 01 48 8B 0D ?? ?? ?? ??");
+    const auto clear = unique(fn, "48 8B CF E8 ?? ?? ?? ?? 33 FF 48 89 3D ?? ?? ?? ??");
+    const auto destroy = unique(fn, "40 F6 C6 01 74 ?? BA ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ??");
+    if (!identity || !clear || !destroy || !memory::is_image_data(clear[3].rip(), 8)) return {};
+    std::uintptr_t deleting_destructor = 0;
+    if (!code_image().contains(identity[0].rip(), 8) ||
+        !read_pointer_guarded(identity[0].rip(), deleting_destructor) ||
+        deleting_destructor != fn.begin)
+        return {};
+    return PracticeDiscovery{fn.begin, clear[3].rip()};
+}
+struct PoolDiscovery {
+    std::uintptr_t address, first, second;
+    std::uint32_t state, first_size, second_size;
+};
+static std::optional<PoolDiscovery> pool_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto first =
+        unique(fn,
+               "33 C0 48 89 41 ?? 48 39 05 ?? ?? ?? ?? 75 ?? B9 ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+               "48 8B 0D ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 85 C9 74 ?? E8 ?? ?? ?? ?? "
+               "48 8B 05 ?? ?? ?? ?? 33 D2 41 B8 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ??");
+    const auto second =
+        unique(fn,
+               "48 83 3D ?? ?? ?? ?? 00 75 ?? B9 ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+               "48 8B 0D ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 85 C9 74 ?? E8 ?? ?? ?? ?? "
+               "48 8B 05 ?? ?? ?? ?? 33 D2 41 B8 ?? ?? ?? ?? 48 8B C8");
+    const auto finish = unique(fn, "48 83 C4 ?? E9 ?? ?? ?? ?? 48 83 C4 ?? C3");
+    if (!first || !second || !finish || first[3].relative() != second[0].address ||
+        first[9].relative() != first[12].address || second[7].relative() != second[10].address ||
+        second[1].relative() != finish[2].address || first[5].relative() != second[3].relative() ||
+        first[10].relative() != second[8].relative() ||
+        first[15].relative() != finish[1].relative())
+        return {};
+    const auto p1 = first[2].rip(), p2 = second[0].rip();
+    if (!p1 || !p2 || p1 == p2 || !memory::is_image_data(p1, 8) || !memory::is_image_data(p2, 8))
+        return {};
+    for (auto i : {6, 7, 11})
+        if (first[i].rip() != p1) return {};
+    for (auto i : {4, 5, 9})
+        if (second[i].rip() != p2) return {};
+    if (first[4].decoded.imm.imm32 != first[13].decoded.imm.imm32 ||
+        second[2].decoded.imm.imm32 != second[11].decoded.imm.imm32)
+        return {};
+    return PoolDiscovery{fn.begin,
+                         p1,
+                         p2,
+                         static_cast<std::uint32_t>(first[1].displacement()),
+                         first[4].decoded.imm.imm32,
+                         second[2].decoded.imm.imm32};
+}
+struct FinalizeDiscovery {
+    std::uintptr_t address;
+    SessionLayout layout;
+    std::uint32_t native_flag;
+};
+static std::optional<FinalizeDiscovery> finalize_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto gate = unique(fn, "F7 01 ?? ?? ?? ?? 48 8B F9 75 ?? 32 C0");
+    const auto pending = unique(fn,
+                                "C7 81 ?? ?? ?? ?? 00 00 00 00 E8 ?? ?? ?? ?? "
+                                "48 8D 15 ?? ?? ?? ?? 48 8B C8 E8 ?? ?? ?? ?? 48 8B D8");
+    const auto side = unique(fn, "0F BE 88 ?? ?? ?? ?? 48 8B 03 83 F1 01");
+    const auto flags = unique(fn,
+                              "48 8B 04 CA 48 85 C0 74 ?? 48 05 ?? ?? ?? ?? EB ?? B8 ?? ?? ?? ?? "
+                              "C7 00 01 00 00 00 B0 01 C6 87 ?? ?? ?? ?? 00");
+    const auto bounds = unique(fn,
+                               "83 F9 FF 74 ?? 48 8B 50 08 48 8B 40 10 48 2B C2 "
+                               "48 63 C9 48 C1 F8 03 48 3B C1 76 ??");
+    if (!gate || !pending || !side || !flags || !bounds ||
+        flags[2].relative() != flags[5].address || flags[4].relative() != flags[6].address ||
+        bounds[1].relative() != flags[5].address ||
+        bounds[8].address + bounds[8].decoded.len != flags[0].address)
+        return {};
+    SessionLayout layout{static_cast<std::uint32_t>(pending[0].displacement()),
+                         flags[5].decoded.imm.imm32,
+                         static_cast<std::uint32_t>(flags[8].displacement()),
+                         gate[0].decoded.imm.imm32};
+    const auto native = flags[3].decoded.imm.imm32;
+    if (!layout.active_mask || (layout.active_mask & (layout.active_mask - 1)) ||
+        native < layout.player_flag || native - layout.player_flag < 8 ||
+        native - layout.player_flag > 0x1000 || (native - layout.player_flag) % 8 ||
+        layout.pending < 4 || layout.pending > 0x1000 || layout.pending % 4 ||
+        layout.player_flag < 0x100 || layout.player_flag > 0x10000 || layout.player_flag % 4 ||
+        layout.finished < 4 || layout.finished > 0x1000 ||
+        (layout.finished >= layout.pending && layout.finished < layout.pending + 4))
+        return {};
+    return FinalizeDiscovery{fn.begin, layout, native};
+}
+struct RefreshDiscovery {
+    std::uintptr_t address;
+    std::uint32_t p1, p2, bias;
+};
+static std::optional<RefreshDiscovery> refresh_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto first = unique(fn, "E8 ?? ?? ?? ?? EB ?? 33 C0 48 89 43 ??");
+    const auto second = unique(fn, "E8 ?? ?? ?? ?? EB ?? 33 C0 48 83 7B ?? 00 48 89 43 ??");
+    const auto zero = unique(fn, "C7 05 ?? ?? ?? ?? 00 00 00 00");
+    const auto one = unique(fn, "C7 05 ?? ?? ?? ?? 01 00 00 00");
+    if (!first || !second || !zero || !one || first[0].address >= second[0].address ||
+        first[0].relative() != second[0].relative() || first[1].relative() != first[3].address ||
+        second[1].relative() != second[3].address ||
+        first[3].displacement() != second[3].displacement())
+        return {};
+    unsigned p1_loads = 0, p2_loads = 0;
+    for (const auto& i : fn.instructions) {
+        if (i.decoded.opcode != 0x8b || i.decoded.modrm != 0x05 || i.decoded.rex_w) continue;
+        if (i.rip() == zero[0].rip() && i.address < first[0].address) ++p1_loads;
+        if (i.rip() == one[0].rip() && i.address > first[3].address &&
+            i.address < second[0].address)
+            ++p2_loads;
+    }
+    if (p1_loads != 1 || p2_loads != 1 || zero[0].rip() == one[0].rip()) return {};
+    const auto getter = function(code_image(), first[0].relative());
+    if (!getter || getter.begin != first[0].relative()) return {};
+    const auto player = unique(getter,
+                               "49 8B 50 ?? 48 8B C8 49 8B 40 ?? 48 2B C2 48 C1 F8 03 "
+                               "48 3B C1 76 ?? 48 8B 04 CA 48 85 C0 74 ?? 48 05 ?? ?? ?? ??");
+    if (!player || player[2].displacement() != player[0].displacement() + 8) return {};
+    const auto p1 = first[3].displacement(), p2 = second[4].displacement();
+    const auto bias = player[10].decoded.imm.imm32;
+    if (p1 < 8 || p1 >= 128 || p1 % 8 || p2 < 8 || p2 >= 128 || p2 % 8 || p1 == p2 || bias < 8 ||
+        bias > 0x1000 || bias % 8)
+        return {};
+    return RefreshDiscovery{fn.begin, static_cast<std::uint32_t>(p1),
+                            static_cast<std::uint32_t>(p2), bias};
+}
+
+struct MoveDiscovery {
+    std::uintptr_t address, accessor;
+    MovelistLayout layout;
+};
+static std::optional<MoveDiscovery> move_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto wrapper =
+        unique(fn,
+               "E8 ?? ?? ?? ?? 0F BE 8B ?? ?? ?? ?? 48 8D 54 24 ?? 83 F1 01 89 4C 24 ?? "
+               "48 8B C8 E8 ?? ?? ?? ?? 48 85 C0 74 ?? 44 8B C7 33 D2 48 8B C8 E8 ?? ?? ?? ??");
+    const auto none = unique(fn, "B8 FF FF FF FF");
+    if (!wrapper || !none || wrapper[2].displacement() != wrapper[4].displacement() ||
+        !reaches_before_exit(fn, wrapper[8].relative(), none[0].address))
+        return {};
+    const auto element_fn = helper(code_image(), wrapper[6].relative());
+    const auto field_fn = helper(code_image(), wrapper[12].relative());
+    const auto element = unique(
+        element_fn,
+        "48 63 02 83 F8 FF 74 ?? 4C 8B 01 4C 8B C8 48 8B 49 ?? 48 B8 ?? ?? ?? ?? ?? ?? ?? ?? "
+        "49 2B C8 48 F7 E9 48 C1 FA ?? 48 8B C2 48 C1 E8 3F 48 03 D0 4C 3B CA 73 ?? "
+        "49 69 C1 ?? ?? ?? ?? 49 03 C0 C3 33 C0 C3");
+    const auto field =
+        unique(field_fn,
+               "41 83 F8 07 77 ?? 49 63 C0 48 63 D2 48 8D 14 D0 8B 44 91 ?? C3 B8 FF FF FF FF C3");
+    if (!element || !field || element[2].relative() != element[18].address ||
+        element[14].relative() != element[18].address || field[1].relative() != field[7].address)
+        return {};
+    MovelistLayout l{static_cast<std::uint32_t>(wrapper[1].displacement()),
+                     element[15].decoded.imm.imm32,
+                     static_cast<std::uint32_t>(field[5].displacement()),
+                     static_cast<std::uint32_t>(element[5].displacement())};
+    const auto shift = element[9].decoded.imm.imm8;
+    const auto magic = element[6].decoded.imm.imm64;
+    if (!l.human_side || l.human_side > 0x10000 || l.element_stride < 64 ||
+        l.element_stride > 0x10000 || l.element_stride % 8 || l.vector_end < 8 ||
+        l.vector_end >= 128 || l.vector_end % 8 || l.move_ids < 4 || l.move_ids >= 128 ||
+        l.move_ids % 4 || l.move_ids + 32 > l.element_stride || shift > 30 || magic >> 63)
+        return {};
+    std::uint64_t high = 0;
+    const auto low = _umul128(magic, l.element_stride, &high);
+    if (high != (1ull << shift) || low >= l.element_stride) return {};
+    return MoveDiscovery{fn.begin, wrapper[0].relative(), l};
+}
+static std::optional<std::uint32_t> slot_flags_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto limits = unique(fn,
+                               "48 63 EA 41 8B C1 41 8B D8 48 8B F1 83 FD 07 0F 87 ?? ?? ?? ?? "
+                               "83 F8 02 0F 8D ?? ?? ?? ?? 85 C0 79 ?? E8 ?? ?? ?? ??");
+    const auto store = unique(fn,
+                              "48 63 C8 48 8D 0C CD ?? ?? ?? ?? 48 03 CD 89 9C CE ?? ?? ?? ?? "
+                              "83 FB 02 75 ?? 44 8B CD 41 B0 01 33 D2 48 8B CE");
+    if (!limits || !store || limits[5].relative() != limits[7].relative() ||
+        limits[9].relative() != store[0].address || store[1].displacement())
+        return {};
+    const auto field = store[3].displacement();
+    if (field < 4 || field > 0x10000 || field % 4) return {};
+    return static_cast<std::uint32_t>(field);
+}
+
+static std::optional<std::uint32_t> counter_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto first = unique(fn,
+                              "41 8B F8 48 8B F2 48 8B D9 E8 ?? ?? ?? ?? 8B 80 ?? ?? ?? ?? "
+                              "39 06 75 ?? 89 7B ??");
+    const auto second =
+        unique(fn, "48 8B CB E8 ?? ?? ?? ?? 8B 80 ?? ?? ?? ?? 39 06 75 ?? 89 7B ??");
+    if (!first || !second || first[6].relative() != second[0].address ||
+        first[4].displacement() != second[2].displacement() ||
+        first[7].displacement() == second[5].displacement() ||
+        second[4].relative() != second[5].address + second[5].decoded.len)
+        return {};
+    const auto field = second[5].displacement();
+    if (field < 4 || field >= 128 || field % 4) return {};
+    return static_cast<std::uint32_t>(field);
+}
+static std::optional<std::uint32_t> pause_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto gate = unique(fn, "80 79 ?? 00 0F B6 DA 48 8B F9 75 ?? 84 D2 74 ??");
+    const auto enabled = unique(fn, "B2 01 48 8B C8 E8 ?? ?? ?? ?? 88 5F ??");
+    const auto direct = unique(fn, "88 59 ??");
+    if (!gate || !enabled || !direct || gate[3].relative() != direct[0].address ||
+        gate[5].relative() != direct[0].address ||
+        gate[0].displacement() != enabled[3].displacement() ||
+        gate[0].displacement() != direct[0].displacement())
+        return {};
+    const auto field = gate[0].displacement();
+    if (field <= 0 || field >= 128) return {};
+    return static_cast<std::uint32_t>(field);
+}
+static std::optional<std::uint32_t> side_record_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto zero = unique(fn, "33 F6");
+    const auto loop = unique(
+        fn,
+        "48 0F BE C7 48 69 C8 ?? ?? ?? ?? "
+        "48 89 B4 19 ?? ?? ?? ?? 48 89 B4 19 ?? ?? ?? ?? 48 89 B4 19 ?? ?? ?? ?? "
+        "89 B4 19 ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 03 CB E8 ?? ?? ?? ?? FF C7 83 FF 02 7C ??");
+    if (!zero || !loop || zero[0].address >= loop[0].address ||
+        loop[11].relative() != loop[0].address)
+        return {};
+    const auto item_fn = helper(code_image(), loop[8].relative());
+    const auto item = unique(item_fn,
+                             "33 D2 48 C7 41 ?? FF FF FF FF 33 C0 48 89 11 "
+                             "48 89 51 ?? 0F 57 C0 48 89 51 ??");
+    if (!item) return {};
+    const auto stride = loop[1].decoded.imm.imm32, base = loop[6].decoded.imm.imm32;
+    const auto member = item[1].displacement();
+    if (base < 4 || base >= 0x10000 || stride < 64 || stride >= 0x10000 || stride % 8 ||
+        member < 0 || member >= 128 || member + 8u > stride || (base + stride + member) % 4)
+        return {};
+    return base + stride + member;
+}
+static std::optional<std::uint32_t> recording_state_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto state = unique(fn,
+                              "8B FA 48 8B D9 E8 ?? ?? ?? ?? 84 C0 74 ?? "
+                              "89 7B ?? 89 7B ?? 83 EF 01 74 ?? 83 FF 01 75 ??");
+    if (!state || state[4].relative() != state[10].relative() ||
+        state[6].displacement() != state[5].displacement() + 4)
+        return {};
+    const auto field = state[6].displacement();
+    if (field < 4 || field >= 128 || field % 4) return {};
+    return static_cast<std::uint32_t>(field);
+}
+
+struct RecordingFormatDiscovery {
+    std::uintptr_t pool;
+};
+static std::optional<RecordingFormatDiscovery> consumer_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto head = unique(fn,
+                             "48 63 47 ?? 48 69 C8 22 1C 00 00 48 03 0D ?? ?? ?? ?? "
+                             "0F B7 11 48 8D 59 02 EB ??");
+    const auto duration = unique(fn,
+                                 "42 0F B6 4C B3 03 3B 4C EF ?? 77 ?? 44 89 7C EF ?? "
+                                 "FF 44 EF ?? 44 8B 74 EF ?? 0F B7 C2 44 3B F0 72 ??");
+    const auto keys = unique(fn,
+                             "49 63 C6 48 8D 0C 83 0F B7 04 83 25 DF FF 00 00 41 89 45 ?? "
+                             "0F B6 01 C0 E8 05 24 01 41 88 04 24");
+    if (!head || !duration || !keys || head[1].decoded.imm.imm32 != 7202 ||
+        head[0].address >= duration[0].address || duration[0].address >= keys[0].address ||
+        duration[1].displacement() != duration[3].displacement() ||
+        duration[4].displacement() != duration[5].displacement() ||
+        !memory::is_image_data(head[2].rip(), 8))
+        return {};
+    return RecordingFormatDiscovery{head[2].rip()};
+}
+static std::optional<RecordingFormatDiscovery> copy_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto copy =
+        unique(fn,
+               "48 63 4F ?? 4C 63 C3 49 03 C8 48 69 C9 ?? ?? ?? ?? "
+               "49 8D 40 ?? 41 B8 ?? ?? ?? ?? 48 03 0D ?? ?? ?? ?? 48 69 D0 ?? ?? ?? ?? "
+               "48 03 15 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+    if (!copy || copy[3].decoded.imm.imm32 != 7202 || copy[5].decoded.imm.imm32 != 7202 ||
+        copy[7].decoded.imm.imm32 != 7202 || copy[6].rip() != copy[8].rip() ||
+        !memory::is_image_data(copy[6].rip(), 8))
+        return {};
+    return RecordingFormatDiscovery{copy[6].rip()};
+}
+static std::optional<std::uint32_t> invoke_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto arguments = unique(fn, "48 8B 59 ?? 4D 8B F1 49 8B F8 48 8B F2 48 8B E9");
+    const auto invoke = unique(fn,
+                               "48 8B 9F ?? ?? ?? ?? 4D 8B C6 48 8B D7 48 89 AF ?? ?? ?? ?? "
+                               "48 8B CE FF 95 ?? ?? ?? ??");
+    const auto restore = unique(fn, "48 89 9F ?? ?? ?? ??");
+    if (!arguments || !invoke || !restore || arguments[0].address >= invoke[0].address ||
+        restore[0].address <= invoke[5].address ||
+        invoke[0].displacement() != invoke[3].displacement() ||
+        invoke[0].displacement() != restore[0].displacement())
+        return {};
+    const auto field = invoke[5].displacement();
+    if (field < 8 || field > 0x1000 || field % 8) return {};
+    return static_cast<std::uint32_t>(field);
+}
+struct EventDiscovery {
+    std::uintptr_t address;
+    std::uint32_t flags, parms;
+};
+static std::optional<EventDiscovery> event_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto gate =
+        unique(fn,
+               "4D 8B E0 48 8B F2 4C 8B F9 48 85 C9 0F 84 ?? ?? ?? ?? "
+               "F7 41 ?? 00 00 00 60 0F 85 ?? ?? ?? ?? 45 33 F6 F7 82 ?? ?? ?? ?? 00 04 00 00");
+    const auto parms = unique(fn,
+                              "0F B7 8E ?? ?? ?? ?? 33 D2 44 2B C1 48 03 CF 4D 63 C0 "
+                              "E8 ?? ?? ?? ?? 44 0F B7 86 ?? ?? ?? ??");
+    if (!gate || !parms || gate[4].relative() != gate[6].relative() ||
+        parms[0].displacement() != parms[6].displacement())
+        return {};
+    const auto flags = gate[5].displacement(), size = parms[0].displacement();
+    if (flags < 4 || flags >= 128 || flags % 4 || size < 8 || size > 0x1000 || size % 2) return {};
+    return EventDiscovery{fn.begin, static_cast<std::uint32_t>(flags),
+                          static_cast<std::uint32_t>(size)};
+}
+struct NameDiscovery {
+    std::uintptr_t pool;
+    std::uint32_t blocks, text;
+};
+static std::optional<NameDiscovery> name_at(const native_scan::Function& fn) {
+    using namespace native_scan;
+    const auto init = unique(fn,
+                             "80 3D ?? ?? ?? ?? 00 48 8B FA 8B 19 74 ?? "
+                             "4C 8D 05 ?? ?? ?? ?? EB ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B "
+                             "C0 C6 05 ?? ?? ?? ?? 01");
+    const auto decode =
+        unique(fn,
+               "8B CB 0F B7 C3 C1 E9 10 89 4C 24 ?? 89 44 24 ?? 48 8B 44 24 ?? "
+               "48 C1 E8 20 8D 1C 00 49 03 5C C8 ?? 48 8B CF 44 0F B7 03 48 8D 53 ?? "
+               "49 C1 E8 06 E8 ?? ?? ?? ?? 0F B7 03");
+    const auto end = unique(fn, "48 C1 E8 06 C6 04 38 00");
+    if (!init || !decode || !end || init[0].rip() != init[9].rip() ||
+        init[4].rip() != init[6].rip() || init[3].relative() != init[6].address ||
+        init[5].relative() != decode[0].address ||
+        decode[3].displacement() != decode[5].displacement() ||
+        decode[4].displacement() != decode[3].displacement() + 4 ||
+        !memory::is_image_data(init[4].rip(), 8))
+        return {};
+    const auto blocks = decode[8].displacement(), text = decode[11].displacement();
+    if (blocks < 8 || blocks >= 128 || blocks % 8 || text < 2 || text >= 128 || text % 2) return {};
+    return NameDiscovery{init[4].rip(), static_cast<std::uint32_t>(blocks),
+                         static_cast<std::uint32_t>(text)};
+}
+
+// Small identity/allocator helpers have no unrelated gameplay work to omit.
+// Preserve their operation graph while allowing NOPs and branch widening.
+static native_scan::Match graph_contract(const native_scan::Function& fn, const Pattern& pattern) {
+    PatternByte expected[256];
+    const auto size = decode_pattern(pattern.notation, expected, std::size(expected));
+    std::vector<std::uint8_t> bytes(size);
+    for (std::size_t i = 0; i < size; ++i)
+        bytes[i] = expected[i] < 0 ? 0 : static_cast<std::uint8_t>(expected[i]);
+    const auto base = reinterpret_cast<std::uintptr_t>(bytes.data());
+    const auto shape = native_scan::decode(base, base + size);
+    if (!shape) return {};
+    std::vector<std::pair<std::size_t, std::size_t>> edges;
+    for (std::size_t i = 0; i < shape.instructions.size(); ++i) {
+        const auto& instruction = shape.instructions[i];
+        const auto& d = instruction.decoded;
+        if (!(d.flags & F_RELATIVE) || d.opcode == 0xE8) continue;
+        const auto immediate_size = d.flags & F_IMM32 ? 4u : 1u;
+        const auto offset = instruction.address - base + d.len - immediate_size;
+        if (expected[offset] < 0) continue;
+        const auto target = instruction.relative();
+        const auto found =
+            std::find_if(shape.instructions.begin(), shape.instructions.end(),
+                         [&](const auto& candidate) { return candidate.address == target; });
+        if (found == shape.instructions.end()) return {};
+        edges.push_back({i, static_cast<std::size_t>(found - shape.instructions.begin())});
+        for (std::size_t j = 0; j < immediate_size; ++j)
+            expected[offset + j] = WILD;
+    }
+    constexpr char hex[] = "0123456789ABCDEF";
+    std::string notation;
+    for (std::size_t i = 0; i < size; ++i) {
+        if (expected[i] < 0)
+            notation += "?? ";
+        else {
+            notation += hex[expected[i] >> 4];
+            notation += hex[expected[i] & 15];
+            notation += ' ';
+        }
+    }
+    auto match = native_scan::unique(fn, notation);
+    if (!match) return {};
+    for (const auto& [from, to] : edges)
+        if (match[from].relative() != match[to].address) return {};
+    return match;
+}
 
 static bool do_resolve() {
     auto text = find_text_section();
@@ -676,13 +928,32 @@ static bool do_resolve() {
 
     auto text_bytes = reinterpret_cast<const std::uint8_t*>(text.start);
     bool ok = true;
-    ok &= scan_one(PRACTICE_DTOR_SIG, text_bytes, text.size, g_practice_dtor);
-    ok &= scan_one(PLAYER_REFRESH_SIG, text_bytes, text.size, g_player_refresh);
-    ok &= scan_one(POOL_INIT_SIG, text_bytes, text.size, g_pool_init);
-    if (scan_one(SESSION_FINALIZE_SIG, text_bytes, text.size, g_session_finalize)) {
-        g_session_layout = decode_session_layout(
-            reinterpret_cast<const std::uint8_t*>(g_session_finalize.load()), 172);
-        g_session_layout_ready.store(g_session_layout.player_flag != 0, std::memory_order_release);
+    const auto practice =
+        discover<PracticeDiscovery>(PRACTICE_DTOR_SIG, text_bytes, text.size, practice_at);
+    const auto refresh =
+        discover<RefreshDiscovery>(PLAYER_REFRESH_SIG, text_bytes, text.size, refresh_at);
+    const auto pool = discover<PoolDiscovery>(POOL_INIT_SIG, text_bytes, text.size, pool_at);
+    const auto finalize =
+        discover<FinalizeDiscovery>(SESSION_FINALIZE_SIG, text_bytes, text.size, finalize_at);
+    if (practice) {
+        g_practice_dtor.store(practice->address);
+        g_practice_slot.store(practice->slot);
+    } else
+        ok = false;
+    if (refresh)
+        g_player_refresh.store(refresh->address);
+    else
+        ok = false;
+    if (pool) {
+        g_pool_init.store(pool->address);
+        g_pool1_ptr.store(pool->first);
+        g_pool2_ptr.store(pool->second);
+    } else
+        ok = false;
+    if (finalize) {
+        g_session_finalize.store(finalize->address);
+        g_session_layout = finalize->layout;
+        g_session_layout_ready.store(true, std::memory_order_release);
     }
     if (!g_session_layout_ready.load()) {
         OPENDOJO_LOG("signatures: session finalization disabled (layout unavailable)");
@@ -694,19 +965,19 @@ static bool do_resolve() {
     }
 
     {
-        PatternByte pattern[128];
-        const auto count =
-            decode_pattern(SUBSYSTEM_LOOKUP_SIG.notation, pattern, std::size(pattern));
-        const auto match = scan_unique(text_bytes, text.size, pattern, count);
-        if (match.hit_count == 1) {
-            g_subsystem_layout =
-                decode_subsystem_layout(reinterpret_cast<const std::uint8_t*>(match.addr), count);
-            g_subsystem_layout_ready.store(g_subsystem_layout.bucket_stride != 0,
-                                           std::memory_order_release);
+        int hits = 0;
+        for (auto address :
+             candidates({"subsystem_lookup", "4C 8B 41 ?? 44 8B 0A 49 8B 88 ?? ?? ?? ??"},
+                        text_bytes, text.size)) {
+            auto layout = subsystem_at(native_scan::helper(code_image(), address));
+            if (!layout.bucket_stride) continue;
+            ++hits;
+            g_subsystem_layout = layout;
         }
+        g_subsystem_layout_ready.store(hits == 1, std::memory_order_release);
         if (!g_subsystem_layout_ready.load()) {
             OPENDOJO_LOG("signatures: subsystem layout unavailable (%d matches); lookup disabled",
-                         match.hit_count);
+                         hits);
             ok = false;
         } else {
             OPENDOJO_LOG(
@@ -716,25 +987,11 @@ static bool do_resolve() {
         }
     }
 
-    if (scan_one(MOVE_WRAPPER_SIG, text_bytes, text.size, g_move_wrapper)) {
-        const auto wrapper = g_move_wrapper.load();
-        const auto element = decode_rip32(wrapper + 42, 1, 5);
-        const auto field = decode_rip32(wrapper + 60, 1, 5);
-        auto matches = [&](std::uintptr_t at, const Pattern& pattern) {
-            PatternByte bytes[128];
-            const auto count = decode_pattern(pattern.notation, bytes, std::size(bytes));
-            return count && at >= text.start && at - text.start < text.size &&
-                   count <= text.size - (at - text.start) &&
-                   match_at(reinterpret_cast<const std::uint8_t*>(at), bytes, count);
-        };
-        if (matches(element, MOVE_ELEMENT_SIG) && matches(field, MOVE_FIELD_SIG)) {
-            g_movelist_layout =
-                decode_movelist_layout(reinterpret_cast<const std::uint8_t*>(wrapper), 92,
-                                       reinterpret_cast<const std::uint8_t*>(element), 67,
-                                       reinterpret_cast<const std::uint8_t*>(field), 27);
-            g_movelist_layout_ready.store(g_movelist_layout.element_stride != 0,
-                                          std::memory_order_release);
-        }
+    const auto moves = discover<MoveDiscovery>(MOVE_WRAPPER_SIG, text_bytes, text.size, move_at);
+    if (moves) {
+        g_move_wrapper.store(moves->address);
+        g_movelist_layout = moves->layout;
+        g_movelist_layout_ready.store(true, std::memory_order_release);
     }
     if (!g_movelist_layout_ready.load()) {
         OPENDOJO_LOG("signatures: movelist layout unavailable; movelist access disabled");
@@ -745,14 +1002,9 @@ static bool do_resolve() {
                      g_movelist_layout.move_ids, g_movelist_layout.vector_end);
     }
 
-    if (scan_one(SLOT_FLAGS_SIG, text_bytes, text.size, g_slot_flags_getter)) {
-        std::uint32_t field = 0;
-        std::memcpy(&field, reinterpret_cast<const void*>(g_slot_flags_getter.load() + 71), 4);
-        std::uint32_t index_bias = 0;
-        std::memcpy(&index_bias, reinterpret_cast<const void*>(g_slot_flags_getter.load() + 61), 4);
-        if (!index_bias && field >= 4 && field <= 0x10000 && field % 4 == 0)
-            g_slot_flags.store(field, std::memory_order_release);
-    }
+    const auto flags =
+        discover<std::uint32_t>(SLOT_FLAGS_SIG, text_bytes, text.size, slot_flags_at);
+    if (flags) g_slot_flags.store(*flags, std::memory_order_release);
     if (!g_slot_flags.load()) {
         OPENDOJO_LOG("signatures: gameplay slot flags unavailable; slot access disabled");
         ok = false;
@@ -760,41 +1012,16 @@ static bool do_resolve() {
         OPENDOJO_LOG("signatures: gameplay slot flags=0x%X", g_slot_flags.load());
 
     {
-        std::atomic<std::uintptr_t> counter{0}, pause{0}, reset{0}, recording{0};
-        const bool matched = scan_one(SESSION_COUNTER_SIG, text_bytes, text.size, counter) &
-                             scan_one(SUBB_PAUSE_SIG, text_bytes, text.size, pause) &
-                             scan_one(SUBC_RESET_SIG, text_bytes, text.size, reset) &
-                             scan_one(RECORDING_STATE_SIG, text_bytes, text.size, recording);
-        if (matched) {
-            const auto item = decode_rip32(reset.load() + 100, 1, 5);
-            PatternByte bytes[64];
-            const auto count = decode_pattern(SUBC_ITEM_SIG.notation, bytes, std::size(bytes));
-            if (item >= text.start && item - text.start < text.size &&
-                count <= text.size - (item - text.start) &&
-                match_at(reinterpret_cast<const std::uint8_t*>(item), bytes, count)) {
-                auto byte = [](std::uintptr_t at) {
-                    return *reinterpret_cast<const std::uint8_t*>(at);
-                };
-                auto word = [](std::uintptr_t at) {
-                    std::uint32_t v;
-                    std::memcpy(&v, reinterpret_cast<const void*>(at), 4);
-                    return v;
-                };
-                const auto stride = word(reset.load() + 55), base = word(reset.load() + 93);
-                RecordingStateLayout l{byte(counter.load() + 78), byte(pause.load() + 12),
-                                       base + stride + byte(item + 5), byte(recording.load() + 29)};
-                if (l.counter >= 4 && l.counter < 128 && l.counter % 4 == 0 && l.pause &&
-                    l.pause < 128 && l.pause == byte(pause.load() + 58) &&
-                    l.pause == byte(pause.load() + 72) && base >= 4 && base < 0x10000 &&
-                    stride >= 64 && stride < 0x10000 && stride % 8 == 0 && byte(item + 5) < 128 &&
-                    byte(item + 5) + 8u <= stride && l.side_record % 4 == 0 &&
-                    l.recording_state >= 4 && l.recording_state < 128 &&
-                    l.recording_state % 4 == 0 &&
-                    l.recording_state == byte(recording.load() + 26) + 4u) {
-                    g_recording_state_layout = l;
-                    g_recording_state_ready.store(true, std::memory_order_release);
-                }
-            }
+        const auto counter =
+            discover<std::uint32_t>(SESSION_COUNTER_SIG, text_bytes, text.size, counter_at);
+        const auto pause = discover<std::uint32_t>(SUBB_PAUSE_SIG, text_bytes, text.size, pause_at);
+        const auto side =
+            discover<std::uint32_t>(SUBC_RESET_SIG, text_bytes, text.size, side_record_at);
+        const auto state =
+            discover<std::uint32_t>(RECORDING_STATE_SIG, text_bytes, text.size, recording_state_at);
+        if (counter && pause && side && state) {
+            g_recording_state_layout = {*counter, *pause, *side, *state};
+            g_recording_state_ready.store(true, std::memory_order_release);
         }
         if (!g_recording_state_ready.load()) {
             OPENDOJO_LOG(
@@ -808,47 +1035,32 @@ static bool do_resolve() {
     }
 
     {
-        auto unique = [&](const Pattern& pat, const std::uint8_t* begin, std::size_t size) {
-            PatternByte bytes[256];
-            const auto n = decode_pattern(pat.notation, bytes, std::size(bytes));
-            return scan_unique(begin, size, bytes, n).addr;
+        auto character = [&](const Pattern& short_anchor, const Pattern& near_anchor,
+                             const Pattern& contract) {
+            native_scan::Match result;
+            for (const auto& anchor : {short_anchor, near_anchor}) {
+                for (auto address : candidates(anchor, text_bytes, text.size)) {
+                    auto match =
+                        graph_contract(native_scan::helper(code_image(), address), contract);
+                    if (!match) continue;
+                    if (result) return native_scan::Match{};
+                    result = std::move(match);
+                }
+            }
+            return result;
         };
-        const auto jack = unique(CHARACTER_JACK_SIG, text_bytes, text.size);
-        const auto alisa = unique(CHARACTER_ALISA_SIG, text_bytes, text.size);
-        std::uintptr_t native = 0;
-        const auto refresh = g_player_refresh.load();
-        DWORD64 image_base = 0;
-        const auto unwind = refresh ? RtlLookupFunctionEntry(refresh, &image_base, nullptr)
-                                    : nullptr;
-        const auto fields = unwind && image_base + unwind->BeginAddress == refresh
-                                ? unique(PLAYER_FIELDS_SIG,
-                                         reinterpret_cast<const std::uint8_t*>(refresh),
-                                         unwind->EndAddress - unwind->BeginAddress)
-                                : 0;
-        bool native_matches = false;
-        if (fields) {
-            native = decode_rip32(fields + 93, 1, 5);
-            PatternByte pattern[128];
-            const auto n = decode_pattern(PLAYER_NATIVE_SIG.notation, pattern, std::size(pattern));
-            native_matches = native >= text.start && native - text.start < text.size &&
-                             n <= text.size - (native - text.start) &&
-                             match_at(reinterpret_cast<const std::uint8_t*>(native), pattern, n);
-        }
-        if (jack && alisa && fields && native_matches) {
-            auto word = [](std::uintptr_t at) {
-                std::uint32_t v;
-                std::memcpy(&v, reinterpret_cast<const void*>(at), 4);
-                return v;
-            };
-            const auto first = *reinterpret_cast<const std::uint8_t*>(fields + 3);
-            const auto again = *reinterpret_cast<const std::uint8_t*>(fields + 105);
-            const auto second = *reinterpret_cast<const std::uint8_t*>(fields + 110);
-            PlayerLayout l{first, second, word(jack + 11), word(native + 49)};
-            if (first >= 8 && first < 128 && first % 8 == 0 && first == again && second >= 8 &&
-                second < 128 && second % 8 == 0 && first != second && l.character >= 4 &&
-                l.character <= 0x10000 && l.character % 4 == 0 && l.character == word(alisa + 14) &&
-                word(jack + 2) == word(alisa + 2) && l.native_bias >= 8 &&
-                l.native_bias <= 0x1000 && l.native_bias % 8 == 0) {
+        const auto jack = character({"character_jack", "80 B9 ?? ?? ?? ?? 05 74"},
+                                    {"character_jack_near", "80 B9 ?? ?? ?? ?? 05 0F 84"},
+                                    CHARACTER_JACK_SIG);
+        const auto alisa = character({"character_alisa", "80 B9 ?? ?? ?? ?? 05 75"},
+                                     {"character_alisa_near", "80 B9 ?? ?? ?? ?? 05 0F 85"},
+                                     CHARACTER_ALISA_SIG);
+        if (jack && alisa && refresh) {
+            PlayerLayout l{refresh->p1, refresh->p2,
+                           static_cast<std::uint32_t>(jack[2].displacement()), refresh->bias};
+            if (l.character >= 4 && l.character <= 0x10000 && l.character % 4 == 0 &&
+                l.character == static_cast<std::uint32_t>(alisa[4].displacement()) &&
+                jack[0].displacement() == alisa[0].displacement()) {
                 g_player_layout = l;
                 g_player_layout_ready.store(true, std::memory_order_release);
             }
@@ -861,9 +1073,7 @@ static bool do_resolve() {
                          g_player_layout.p1, g_player_layout.p2, g_player_layout.character,
                          g_player_layout.native_bias);
         if (g_session_layout_ready.load()) {
-            std::uint32_t native_flag = 0;
-            std::memcpy(&native_flag,
-                        reinterpret_cast<const void*>(g_session_finalize.load() + 140), 4);
+            const auto native_flag = finalize ? finalize->native_flag : 0;
             if (!g_player_layout_ready.load() ||
                 native_flag - g_session_layout.player_flag != g_player_layout.native_bias) {
                 g_session_layout_ready.store(false, std::memory_order_release);
@@ -876,60 +1086,50 @@ static bool do_resolve() {
     }
 
     {
-        std::atomic<std::uintptr_t> find{0}, next{0}, invoke{0}, event{0}, names{0};
-        const bool matched = scan_one(REFLECTION_FIND_SIG, text_bytes, text.size, find) &
-                             scan_one(REFLECTION_NEXT_SIG, text_bytes, text.size, next) &
-                             scan_one(REFLECTION_INVOKE_SIG, text_bytes, text.size, invoke) &
-                             scan_one(PROCESS_EVENT_SIG, text_bytes, text.size, event) &
-                             scan_one(NAME_DECODE_SIG, text_bytes, text.size, names);
-        PatternByte pattern[128];
-        const auto n = decode_pattern(REFLECTION_STEP_SIG.notation, pattern, std::size(pattern));
-        const auto step = scan_unique(text_bytes, text.size, pattern, n).addr;
-        std::uintptr_t parms = 0;
-        if (event.load()) {
-            DWORD64 image_base = 0;
-            const auto unwind = RtlLookupFunctionEntry(event.load(), &image_base, nullptr);
-            PatternByte bytes[64];
-            const auto count = decode_pattern(EVENT_PARMS_SIG.notation, bytes, std::size(bytes));
-            if (unwind && image_base + unwind->BeginAddress == event.load())
-                parms = scan_unique(reinterpret_cast<const std::uint8_t*>(event.load()),
-                                    unwind->EndAddress - unwind->BeginAddress, bytes, count)
-                            .addr;
+        const auto fields = discover_reflection_fields(text_bytes, text.size);
+        const auto invoke =
+            discover<std::uint32_t>(REFLECTION_INVOKE_SIG, text_bytes, text.size, invoke_at);
+        const auto event =
+            discover<EventDiscovery>(PROCESS_EVENT_SIG, text_bytes, text.size, event_at);
+        const auto names = discover<NameDiscovery>(NAME_DECODE_SIG, text_bytes, text.size, name_at);
+        const bool matched = fields.object_class && invoke && event && names;
+        std::optional<std::uint32_t> property;
+        for (auto address : candidates(REFLECTION_STEP_SIG, text_bytes, text.size)) {
+            const auto fn = native_scan::helper(code_image(), address);
+            const auto fast =
+                native_scan::unique(fn, "48 8B 48 ?? 49 89 4A ?? 49 C7 42 ?? 00 00 00 00 C3");
+            const auto slow =
+                native_scan::unique(fn,
+                                    "4C 8B 41 ?? 49 63 41 ?? 49 03 C0 4C 89 41 ?? 48 89 41 ?? 49 "
+                                    "8B C9 49 8B 01 48 FF A0 ?? ?? ?? ??");
+            if (!fast || !slow || fast[1].displacement() != slow[4].displacement() ||
+                fast[2].displacement() != slow[3].displacement())
+                continue;
+            if (property) {
+                property.reset();
+                break;
+            }
+            property = static_cast<std::uint32_t>(slow[1].displacement());
         }
-        if (matched && step && parms) {
-            auto byte = [](std::uintptr_t at) {
-                return *reinterpret_cast<const std::uint8_t*>(at);
-            };
-            auto word = [](std::uintptr_t at) {
-                std::uint32_t v;
-                std::memcpy(&v, reinterpret_cast<const void*>(at), 4);
-                return v;
-            };
-            ReflectionLayout l{byte(find.load() + 164),
-                               byte(find.load() + 419),
-                               byte(event.load() + 68),
-                               byte(find.load() + 291),
-                               byte(find.load() + 95),
-                               byte(find.load() + 425),
-                               byte(find.load() + 219),
-                               byte(find.load() + 232),
-                               byte(step + 65),
-                               word(invoke.load() + 117),
-                               word(next.load() + 171),
-                               byte(names.load() + 87),
-                               byte(names.load() + 98),
-                               event.load(),
-                               decode_rip32(names.load() + 24, 3, 7)};
-            l.function_parms_size = word(parms + 3);
-            const auto pool_again = decode_rip32(names.load() + 33, 3, 7);
-            bool valid = l.function_parms_size == word(parms + 27) && l.function_parms_size >= 8 &&
-                         l.function_parms_size <= 0x1000 && l.function_parms_size % 2 == 0 &&
-                         l.name_pool == pool_again && memory::is_image_data(l.name_pool, 8) &&
-                         l.object_class == byte(find.load() + 363) &&
-                         l.object_class == byte(next.load() + 51) &&
-                         l.children == byte(next.load() + 152) &&
-                         l.children == byte(next.load() + 186) &&
-                         l.field_next == byte(next.load() + 99) &&
+        if (matched && property) {
+            ReflectionLayout l{fields.object_class,
+                               fields.object_name,
+                               event->flags,
+                               fields.children,
+                               fields.child_properties,
+                               fields.field_next,
+                               fields.ffield_name,
+                               fields.ffield_next,
+                               *property,
+                               *invoke,
+                               fields.super_getter_slot,
+                               names->blocks,
+                               names->text,
+                               event->address,
+                               names->pool};
+            l.function_parms_size = event->parms;
+            bool valid = l.function_parms_size >= 8 && l.function_parms_size <= 0x1000 &&
+                         l.function_parms_size % 2 == 0 && memory::is_image_data(l.name_pool, 8) &&
                          l.object_name != l.object_class && l.ffield_next != l.ffield_name &&
                          l.children != l.child_properties && l.super_getter_slot >= 8 &&
                          l.super_getter_slot <= 0x1000 && l.super_getter_slot % 8 == 0;
@@ -962,12 +1162,8 @@ static bool do_resolve() {
     }
 
     {
-        std::atomic<std::uintptr_t> update{0}, scheduler{0}, thread{0}, free{0}, assign{0},
-            valid{0}, get{0};
-        bool found = scan_one(RUNTIME_UPDATE_SIG, text_bytes, text.size, update) &
-                     scan_one(SCHEDULER_SIG, text_bytes, text.size, scheduler) &
-                     scan_one(ENGINE_FREE_SIG, text_bytes, text.size, free) &
-                     scan_one(WEAK_ASSIGN_SIG, text_bytes, text.size, assign);
+        auto update = discover_update(text_bytes, text.size);
+        std::atomic<std::uintptr_t> thread{0};
         auto leaf = [&](const Pattern& p, std::atomic<std::uintptr_t>& out) {
             PatternByte bytes[256];
             const auto n = decode_pattern(p.notation, bytes, std::size(bytes));
@@ -975,97 +1171,88 @@ static bool do_resolve() {
             out.store(match.addr);
             return match.addr != 0;
         };
-        found &= leaf(THREAD_ID_SIG, thread) & leaf(WEAK_VALID_SIG, valid) &
-                 leaf(WEAK_GET_SIG, get);
-        if (found) {
-            const auto thread_slot = decode_rip32(thread.load() + 16, 2, 6);
-            const auto scheduler_slot = decode_rip32(update.load() + 136, 3, 7);
-            const auto thread_iat = decode_rip32(thread.load(), 2, 6);
-            // This CALL must really be Windows GetCurrentThreadId, not just any IAT call.
-            std::uintptr_t thread_api = 0;
-            if (thread_iat >= memory::polaris_base() &&
-                thread_iat - memory::polaris_base() < 0x10000000)
-                read_pointer_guarded(thread_iat, thread_api);
-            if (memory::is_image_data(thread_slot, 4) && memory::is_image_data(scheduler_slot, 8) &&
-                thread_api == reinterpret_cast<std::uintptr_t>(&GetCurrentThreadId) &&
-                decode_rip32(update.load() + 157, 1, 5) == scheduler.load() &&
-                decode_rip32(valid.load() + 15, 2, 6) == decode_rip32(get.load() + 25, 3, 7) &&
-                decode_rip32(valid.load() + 36, 3, 7) == decode_rip32(get.load() + 43, 3, 7)) {
-                g_runtime_layout = {update.load(), thread_slot,  scheduler_slot, free.load(),
-                                    assign.load(), valid.load(), get.load(),     scheduler.load()};
-                g_runtime_ready.store(true, std::memory_order_release);
-            }
+        if (leaf(THREAD_ID_SIG, thread)) {
+            PatternByte shape[64];
+            const auto size = decode_pattern(THREAD_ID_SIG.notation, shape, std::size(shape));
+            const auto instructions = native_scan::unique(
+                native_scan::decode(thread.load(), thread.load() + size), THREAD_ID_SIG.notation);
+            const auto thread_slot = instructions ? instructions[3].rip() : 0;
+            const auto iat = instructions ? instructions[0].rip() : 0;
+            std::uintptr_t api = 0;
+            if (code_image().contains(iat, 8) && read_pointer_guarded(iat, api) &&
+                api == reinterpret_cast<std::uintptr_t>(&GetCurrentThreadId) &&
+                memory::is_image_data(thread_slot, 4))
+                update.game_thread_id = thread_slot;
         }
-        if (!g_runtime_ready.load()) {
-            OPENDOJO_LOG(
-                "signatures: game update/UObject contracts unavailable; native operations "
-                "disabled");
+        // UObject helpers belong to menu renaming, not the import dispatcher.
+        const auto free_fn = discover<native_scan::Match>(
+            {"engine_free",
+             "E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 8B D3 FF 50 ?? 48 83 C4 20 5B C3"},
+            text_bytes, text.size, [](const auto& fn) -> std::optional<native_scan::Match> {
+                auto m = graph_contract(fn, ENGINE_FREE_SIG);
+                if (!m || m[5].rip() != m[9].rip() || !memory::is_image_data(m[5].rip(), 8))
+                    return {};
+                return m;
+            });
+        const auto assign_fn =
+            discover<native_scan::Match>({"weak_assign", "8B 52 ?? 89 11 48 8D 0D ?? ?? ?? ??"},
+                                         text_bytes, text.size,
+                                         [](const auto& fn) -> std::optional<native_scan::Match> {
+                                             auto m = graph_contract(fn, WEAK_ASSIGN_SIG);
+                                             if (!m || !memory::is_image_data(m[7].rip(), 8) ||
+                                                 !code_image().code(m[8].relative()))
+                                                 return {};
+                                             return m;
+                                         });
+        auto weak = [&](const Pattern& anchor, const Pattern& contract) {
+            native_scan::Match result;
+            for (auto address : candidates(anchor, text_bytes, text.size)) {
+                auto m = graph_contract(native_scan::helper(code_image(), address), contract);
+                if (!m) continue;
+                if (result) return native_scan::Match{};
+                result = std::move(m);
+            }
+            return result;
+        };
+        const auto valid_fn = weak({"weak_valid", "44 8B 41 04 45 85 C0"}, WEAK_VALID_SIG);
+        const auto get_fn =
+            weak({"weak_get", "48 83 EC 08 44 8B 51 04 45 33 C0 4C 8B C9"}, WEAK_GET_SIG);
+        if (free_fn && assign_fn && valid_fn && get_fn && valid_fn[6].rip() == get_fn[9].rip() &&
+            valid_fn[12].rip() == get_fn[14].rip() &&
+            valid_fn[17].displacement() == get_fn[22].displacement() &&
+            memory::is_image_data(valid_fn[6].rip(), 4) &&
+            memory::is_image_data(valid_fn[12].rip(), 8)) {
+            update.engine_free = (*free_fn)[0].address;
+            update.weak_assign = (*assign_fn)[0].address;
+            update.weak_valid = valid_fn[0].address;
+            update.weak_get = get_fn[0].address;
+        } else {
+            OPENDOJO_LOG("signatures: UObject contracts unavailable; menu rename disabled");
             ok = false;
         }
+        if (!update.update || !update.scheduler || !update.game_thread_id) {
+            update.update = update.scheduler = update.scheduler_slot = update.game_thread_id = 0;
+            OPENDOJO_LOG(
+                "signatures: scheduler completion contract unavailable; native imports disabled");
+            ok = false;
+        }
+        g_runtime_layout = update;
+        g_runtime_ready.store(true, std::memory_order_release);
     }
 
-    // Phase-2: resolve data slots by scanning the bodies of just-resolved
-    // functions for the instructions that touch them. Each xref is a
-    // single RIP-relative load/store with a distinctive enough surrounding
-    // pattern (xor reg,reg; mov [rip+disp],reg / cmp [rip+disp], rax)
-    // whose unique match must stay within the unwind function boundary.
-
-    // Inside the practice dtor: `xor edi, edi ; mov [rip+disp], rdi`
-    // clears the practice-controller singleton slot. The disp32 starts
-    // at byte +5 of the matched window (the 7-byte mov starts at +2);
-    // total instr length 7.
-    auto practice_slot = resolve_data_ref("practice_slot", g_practice_dtor.load(),
-                                          /*scan_window=*/0x200, "33 FF 48 89 3D ?? ?? ?? ??",
-                                          /*disp_off=*/5, /*instr_len=*/9);
-    if (practice_slot) {
-        g_practice_slot.store(practice_slot, std::memory_order_release);
-    } else {
-        ok = false;
-    }
-
-    // Inside pool_init: `cmp [rip+disp], rax ; jne` near the prologue
-    // checks whether POOL1 has already been allocated. First such
-    // instruction in the function body is POOL1.
-    auto pool1 = resolve_data_ref("pool1_ptr", g_pool_init.load(),
-                                  /*scan_window=*/0x40, "48 39 05 ?? ?? ?? ?? 75",
-                                  /*disp_off=*/3, /*instr_len=*/7);
-    // Decode the second pool's own reference; its global need not stay adjacent.
-    auto pool2 =
-        resolve_data_ref("pool2_ptr", g_pool_init.load(), 0x98, "48 83 3D ?? ?? ?? ?? 00 75", 3, 8);
-    if (pool1 && pool2 && pool1 != pool2) {
-        g_pool1_ptr.store(pool1, std::memory_order_release);
-        g_pool2_ptr.store(pool2, std::memory_order_release);
-    } else {
-        ok = false;
-    }
+    const auto pool1 = pool ? pool->first : 0;
 
     {
-        PatternByte pattern[128];
-        const auto n = decode_pattern(POOL_COPY_SIG.notation, pattern, std::size(pattern));
-        const auto copy = scan_unique(text_bytes, text.size, pattern, n).addr;
-        PatternByte consumer_pattern[256];
-        const auto cn = decode_pattern(POOL_CONSUMER_SIG.notation, consumer_pattern,
-                                       std::size(consumer_pattern));
-        const auto consumer = scan_unique(text_bytes, text.size, consumer_pattern, cn).addr;
-        const auto init = g_pool_init.load();
-        auto word = [](std::uintptr_t at) {
-            std::uint32_t v;
-            std::memcpy(&v, reinterpret_cast<const void*>(at), 4);
-            return v;
-        };
-        // The file codec supports uint16 count + 1800 four-byte events. A native
-        // format change requires a codec migration; never reinterpret old files.
-        if (copy && consumer && init && pool1 && pool2 &&
-            decode_rip32(consumer + 11, 3, 7) == pool1 && g_recording_state_ready.load() &&
-            *reinterpret_cast<const std::uint8_t*>(init + 9) + 4u ==
-                g_recording_state_layout.recording_state &&
-            decode_rip32(init + 29, 3, 7) == pool1 && decode_rip32(init + 36, 3, 7) == pool1 &&
-            decode_rip32(init + 53, 3, 7) == pool1 && decode_rip32(init + 96, 3, 7) == pool2 &&
-            decode_rip32(init + 103, 3, 7) == pool2 && decode_rip32(init + 120, 3, 7) == pool2 &&
-            word(copy + 13) == 7202 && word(copy + 23) == 7202 && word(copy + 37) == 7202 &&
-            word(init + 20) == 9 * 7202 && word(init + 64) == 9 * 7202 &&
-            word(init + 87) == word(init + 131) && decode_rip32(copy + 27, 3, 7) == pool1 &&
-            decode_rip32(copy + 41, 3, 7) == pool1)
+        const auto copy =
+            discover<RecordingFormatDiscovery>(POOL_COPY_SIG, text_bytes, text.size, copy_at);
+        const auto consumer = discover<RecordingFormatDiscovery>(POOL_CONSUMER_SIG, text_bytes,
+                                                                 text.size, consumer_at);
+        // The file codec supports uint16 count + 1800 four-byte events. Format
+        // changes require a codec migration; identification never weakens this check.
+        if (pool && copy && consumer && g_recording_state_ready.load() &&
+            pool->state + 4u == g_recording_state_layout.recording_state &&
+            pool->first_size == 9 * 7202 && pool->second_size > 0 && copy->pool == pool1 &&
+            consumer->pool == pool1)
             g_live_recordings_supported.store(true, std::memory_order_release);
         else {
             OPENDOJO_LOG(
@@ -1076,26 +1263,21 @@ static bool do_resolve() {
     }
 
     {
-        auto matches = [&](std::uintptr_t at, const Pattern& pattern) {
-            PatternByte bytes[128];
-            const auto n = decode_pattern(pattern.notation, bytes, std::size(bytes));
-            return n && at >= text.start && at - text.start < text.size &&
-                   n <= text.size - (at - text.start) &&
-                   match_at(reinterpret_cast<const std::uint8_t*>(at), bytes, n);
-        };
-        const auto wrapper = g_move_wrapper.load();
-        const auto accessor = wrapper ? decode_rip32(wrapper + 15, 1, 5) : 0;
+        using namespace native_scan;
+        const auto accessor = helper(code_image(), moves ? moves->accessor : 0);
+        const auto chain = unique(
+            accessor, "E8 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8B C8 48 83 C4 28 E9 ?? ?? ?? ??");
         std::uintptr_t ctx = 0;
-        if (matches(accessor, RECORD_POOL_ACCESSOR_SIG)) {
-            const auto getter = decode_rip32(accessor + 4, 1, 5);
-            const auto lookup = decode_rip32(accessor + 23, 1, 5);
-            const auto key_addr = decode_rip32(accessor + 9, 3, 7);
+        if (chain) {
+            const auto getter =
+                unique(helper(code_image(), chain[0].relative()), GET_CTX_SIG.notation);
+            const auto lookup = subsystem_at(helper(code_image(), chain[4].relative()));
             std::uint32_t key = 0;
-            if (memory::is_image_data(key_addr, 4))
-                std::memcpy(&key, reinterpret_cast<const void*>(key_addr), 4);
-            if (key == 0xA7A8857B && matches(getter, GET_CTX_SIG) &&
-                matches(lookup, SUBSYSTEM_LOOKUP_SIG) && g_subsystem_layout_ready.load())
-                ctx = decode_rip32(getter, 3, 7);
+            if (memory::is_image_data(chain[1].rip(), 4))
+                native_scan::copy(chain[1].rip(), &key, sizeof(key));
+            if (key == 0xA7A8857B && getter && lookup.bucket_stride &&
+                g_subsystem_layout_ready.load())
+                ctx = getter[0].rip();
         }
         if (ctx && memory::is_image_data(ctx, 8)) {
             g_ctx_ptr.store(ctx, std::memory_order_release);
@@ -1119,33 +1301,38 @@ RuntimeLayout runtime_layout() {
 }
 
 bool native_object_array_abi_supported(std::uintptr_t enumerate) {
-    const auto text = find_text_section();
-    auto matches = [&](std::uintptr_t at, const Pattern& pat) {
-        PatternByte bytes[128];
-        const auto n = decode_pattern(pat.notation, bytes, std::size(bytes));
-        return n && at >= text.start && at - text.start < text.size &&
-               n <= text.size - (at - text.start) &&
-               match_at(reinterpret_cast<const std::uint8_t*>(at), bytes, n);
-    };
-    if (!matches(enumerate, OBJECT_ENUM_SIG)) return false;
-    return matches(decode_rip32(enumerate + 24, 3, 7), OBJECT_APPEND_SIG);
+    using namespace native_scan;
+    const auto fn = helper(code_image(), enumerate);
+    const auto callback =
+        unique(fn, "48 8D 05 ?? ?? ?? ?? 48 89 44 24 ?? 8B 44 24 ?? 89 44 24 ?? E8 ?? ?? ?? ??");
+    if (!callback) return false;
+    const auto append = helper(code_image(), callback[0].rip());
+    const auto grow = unique(append,
+                             "48 8B 19 48 8B 32 48 63 7B 08 8D 47 01 89 43 08 3B 43 0C 76 ?? 8B D7 "
+                             "48 8B CB E8 ?? ?? ?? ?? 48 8B 03");
+    const auto store = unique(append, "48 89 34 F8");
+    return grow && store && grow[6].relative() == grow[10].address &&
+           grow[10].address < store[0].address && code_image().code(grow[9].relative());
 }
 
 bool native_text_abi_supported(std::uintptr_t raw_text) {
-    const auto text = find_text_section();
-    auto matches = [&](std::uintptr_t at, const Pattern& pat) {
-        PatternByte bytes[256];
-        const auto n = decode_pattern(pat.notation, bytes, std::size(bytes));
-        return n && at >= text.start && at - text.start < text.size &&
-               n <= text.size - (at - text.start) &&
-               match_at(reinterpret_cast<const std::uint8_t*>(at), bytes, n);
-    };
-    // Generated wrappers are not globally unique. Validate the actual reflected
-    // SetRawText target and the FString copy/resize routines it calls.
-    if (!matches(raw_text, RAW_TEXT_EXEC_SIG)) return false;
-    const auto copy = decode_rip32(raw_text + 197, 1, 5);
-    if (!matches(copy, FSTRING_COPY_SIG)) return false;
-    return matches(decode_rip32(copy + 79, 1, 5), FSTRING_RESIZE_SIG);
+    using namespace native_scan;
+    // Follow the reflected wrapper's actual call. The count/capacity fields and
+    // UTF-16 element width are ABI requirements, independent of function placement.
+    const auto fn = helper(code_image(), raw_text);
+    const auto call = unique(fn, "48 03 F8 48 89 7B ?? 48 8D 54 24 ?? 48 8B CE E8 ?? ?? ?? ??");
+    if (!call) return false;
+    const auto copy = helper(code_image(), call[4].relative());
+    const auto source = unique(copy, "48 63 5A 08 4C 8B 3A 89 5D ?? 85 DB");
+    const auto resize = unique(copy,
+                               "45 33 C0 8B D3 48 8D 4D ?? E8 ?? ?? ?? ?? 4C 8B C3 4D 03 C0 49 8B "
+                               "D7 48 8B 4D ?? E8 ?? ?? ?? ??");
+    if (!source || !resize || source[0].address >= resize[0].address) return false;
+    const auto allocator = helper(code_image(), resize[3].relative());
+    const auto allocation =
+        unique(allocator, "48 63 D3 41 B8 02 00 00 00 48 03 D2 E8 ?? ?? ?? ?? 48 89 07 89 5F 0C");
+    const auto capacity = unique(allocator, "89 77 0C");
+    return allocation && capacity && code_image().code(allocation[3].relative());
 }
 
 ReflectionLayout reflection_layout() {

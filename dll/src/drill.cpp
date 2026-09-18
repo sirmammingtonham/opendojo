@@ -312,8 +312,12 @@ void encode_recording(std::string& out, const Recording& r, std::size_t idx_one_
     char hdr[128];
     std::snprintf(hdr, sizeof(hdr), "--- recording %zu\n", idx_one_based);
     out += hdr;
-    std::snprintf(hdr, sizeof(hdr), "name:         %s\n", r.name.c_str());
-    out += hdr;
+    // Keep the existing name field readable by older mods. Never let a
+    // pasted newline create another recording/header, or truncate UTF-8.
+    std::string name = r.name;
+    std::replace_if(
+        name.begin(), name.end(), [](char c) { return c == '\r' || c == '\n' || c == '\0'; }, ' ');
+    out += "name:         " + name + "\n";
     // Only emit `kind:` for non-live; old files implicitly mean live.
     if (r.kind != Kind::Live) {
         out += "kind:         movelist\n";
@@ -487,7 +491,12 @@ TextResult decode_text(std::string_view text) {
         if (pos < text.size() && text[pos] == '\n') ++pos;
         if (raw_line.empty() && pos >= text.size()) break;
 
-        auto line = trim(strip_comment(raw_line));
+        // A recording name is literal text: '#' is common in move labels.
+        // Event lines and all other headers retain their comment semantics.
+        std::string_view raw_key, raw_val;
+        const bool literal_name = section == Section::Recording &&
+                                  parse_kv(trim(raw_line), raw_key, raw_val) && raw_key == "name";
+        auto line = trim(literal_name ? raw_line : strip_comment(raw_line));
         if (line.empty()) continue;
 
         if (is_section_marker(line)) {

@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -806,6 +807,7 @@ void try_resolve_bp_classes() {
 struct Capture {
     WeakObject tb;
     std::wstring replacement;
+    std::wstring original_id;
 };
 
 std::vector<Capture> g_caps;
@@ -1047,8 +1049,10 @@ void scan_and_apply_rows() {
         std::uint64_t tb_off = 0, tb_on = 0;
         memory::try_read_u64(raddr + g_r.off_tb_menu_off, &tb_off);
         memory::try_read_u64(raddr + g_r.off_tb_menu_on, &tb_on);
-        if (tb_off) fresh.push_back({WeakObject(reinterpret_cast<void*>(tb_off)), repl});
-        if (tb_on) fresh.push_back({WeakObject(reinterpret_cast<void*>(tb_on)), repl});
+        const std::wstring original_id(id_buf, id_buf + std::strlen(id_buf));
+        if (tb_off)
+            fresh.push_back({WeakObject(reinterpret_cast<void*>(tb_off)), repl, original_id});
+        if (tb_on) fresh.push_back({WeakObject(reinterpret_cast<void*>(tb_on)), repl, original_id});
     }
 
     // Publish unconditionally (even when empty): a slot that became
@@ -1067,6 +1071,21 @@ void scan_and_apply_rows() {
         std::lock_guard<std::mutex> lk(g_caps_mtx);
         g_caps.swap(fresh);
         snapshot = g_caps;
+    }
+    // Removed labels must restore the game's localized text immediately.
+    // Publish first so our SetTextID hook cannot reapply the removed label.
+    for (const auto& previous : fresh) {
+        auto* tb = previous.tb.get();
+        if (!tb) continue;
+        const bool retained = std::any_of(snapshot.begin(), snapshot.end(),
+                                          [tb](const Capture& c) { return c.tb.get() == tb; });
+        if (retained) continue;
+        struct {
+            UE_FString TextID;
+        } parms{};
+        make_fstring(parms.TextID, previous.original_id.c_str());
+        call_process_event(tb, g_r.ufn_set_text_id, &parms);
+        free_fstring(parms.TextID);
     }
     for (const auto& c : snapshot)
         if (auto* tb = c.tb.get()) call_set_raw_text(tb, c.replacement.c_str());

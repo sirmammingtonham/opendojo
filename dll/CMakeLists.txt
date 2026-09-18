@@ -149,7 +149,7 @@ add_library(opendojo SHARED
     src/cloud/worker.cpp
     "${OPENDOJO_PROXY_SRC}")
 
-target_include_directories(opendojo PRIVATE include)
+target_include_directories(opendojo PRIVATE include "${minhook_SOURCE_DIR}/src/hde")
 target_link_libraries(opendojo PRIVATE
     imgui_static
     minhook

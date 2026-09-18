@@ -248,7 +248,6 @@ std::size_t capture_populated_slots(opendojo::drill::Drill& d, bool snapshot_onl
         const auto& slot = captured[i];
         if (slot.kind == opendojo::slot::Kind::Empty) continue;
         auto name = slot.label;
-        if (name.empty()) name = "slot " + std::to_string(i + 1);
         if (slot.kind == opendojo::slot::Kind::MoveList) {
             d.recordings.push_back(
                 opendojo::drill::make_movelist_recording(std::move(name), slot.move_id));

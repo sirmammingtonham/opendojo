@@ -21,41 +21,15 @@ static void check(bool condition) {
 int main() {
     {
         using namespace opendojo::signatures;
-        std::uint8_t move_wrapper[] = {72,  137, 92,  36,  16,  87,  72,  131, 236, 32,  139, 250,
-                                       72,  139, 217, 232, 156, 238, 254, 255, 15,  190, 139, 124,
-                                       4,   0,   0,   72,  141, 84,  36,  48,  131, 241, 1,   137,
-                                       76,  36,  48,  72,  139, 200, 232, 33,  237, 254, 255, 72,
-                                       133, 192, 116, 24,  68,  139, 199, 51,  210, 72,  139, 200,
-                                       232, 15,  243, 254, 255, 72,  139, 92,  36,  56,  72,  131,
-                                       196, 32,  95,  195, 72,  139, 92,  36,  56,  184, 255, 255,
-                                       255, 255, 72,  131, 196, 32,  95,  195};
-        std::uint8_t move_element[] = {72,  99,  2,   131, 248, 255, 116, 56,  76,  139, 1,  76,
-                                       139, 200, 72,  139, 73,  8,   72,  184, 7,   231, 99, 112,
-                                       62,  6,   231, 99,  73,  43,  200, 72,  247, 233, 72, 193,
-                                       250, 7,   72,  139, 194, 72,  193, 232, 63,  72,  3,  208,
-                                       76,  59,  202, 115, 11,  73,  105, 193, 72,  1,   0,  0,
-                                       73,  3,   192, 195, 51,  192, 195};
-        std::uint8_t move_field[] = {65,  131, 248, 7,   119, 15,  73,  99,  192,
-                                     72,  99,  210, 72,  141, 20,  208, 139, 68,
-                                     145, 68,  195, 184, 255, 255, 255, 255, 195};
-        auto decode = [&] {
-            return decode_movelist_layout(move_wrapper, sizeof(move_wrapper), move_element,
-                                          sizeof(move_element), move_field, sizeof(move_field));
+        const Pattern contract{"branch_graph", "85 C0 74 02 33 C0 C3"};
+        std::vector<std::uint8_t> code{0x85, 0xc0, 0x0f, 0x84, 3, 0, 0, 0, 0x90, 0x33, 0xc0, 0xc3};
+        auto match = [&] {
+            const auto at = reinterpret_cast<std::uintptr_t>(code.data());
+            return graph_contract(opendojo::native_scan::decode(at, at + code.size()), contract);
         };
-        check(decode().element_stride == 0x148 && decode().move_ids == 0x44);
-        std::uint32_t stride = 0x150, human = 0x490;
-        std::uint64_t magic = 7027331075698876807ull;
-        std::memcpy(move_element + 56, &stride, 4);
-        std::memcpy(move_element + 20, &magic, 8);
-        std::memcpy(move_wrapper + 23, &human, 4);
-        move_field[19] = 0x50;
-        move_element[17] = 16;
-        check(decode().element_stride == stride && decode().human_side == human &&
-              decode().move_ids == 0x50 && decode().vector_end == 16);
-        ++move_element[20];
-        check(decode().element_stride == 0);  // division disagrees with element indexing
-        check(decode_movelist_layout(move_wrapper, 91, move_element, 67, move_field, 27)
-                  .element_stride == 0);
+        check(bool(match()));
+        code[4] = 1;
+        check(!match());  // Same operations/branch condition, wrong destination.
     }
     {
         using namespace opendojo::signatures;
@@ -86,34 +60,8 @@ int main() {
         check(!decode_subsystem_layout(code.data(), 91).bucket_stride);
     }
 
-    {
-        using namespace opendojo::signatures;
-        PatternByte pattern[256]{};
-        const auto size = decode_pattern(SESSION_FINALIZE_SIG.notation, pattern, 256);
-        check(size == 172);
-        std::vector<std::uint8_t> bytes(size);
-        for (std::size_t i = 0; i < size; ++i)
-            bytes[i] = pattern[i] < 0 ? 0 : static_cast<std::uint8_t>(pattern[i]);
-        auto set = [&](std::size_t at, std::uint32_t value) {
-            std::memcpy(bytes.data() + at, &value, 4);
-        };
-        set(8, 0x400000);
-        set(32, 0x88);
-        set(140, 0x3AE0);
-        set(147, 0x3A50);
-        set(161, 0x99);
-        auto layout = decode_session_layout(bytes.data(), bytes.size());
-        check(layout.pending == 0x88 && layout.player_flag == 0x3A50 && layout.finished == 0x99);
-        set(32, 0xA0);
-        set(140, 0x3B00);
-        set(147, 0x3A70);
-        set(161, 0xB1);
-        layout = decode_session_layout(bytes.data(), bytes.size());
-        check(layout.pending == 0xA0 && layout.player_flag == 0x3A70 && layout.finished == 0xB1);
-        check(decode_session_layout(bytes.data(), bytes.size() - 1).player_flag == 0);
-        set(140, 0x3A70);
-        check(decode_session_layout(bytes.data(), bytes.size()).player_flag == 0);
-    }
+    // Movelist/session field relocation and disagreement are exercised through
+    // production discovery in native_layout_tests, rather than legacy byte readers.
     {
         using namespace opendojo::players;
         CompiledPattern pattern;
@@ -217,4 +165,8 @@ int main() {
     std::cout << "Passed 10,000 scanner comparisons, RIP decoding and memory protection checks\n";
 }
 
-namespace opendojo::subsystems { std::uintptr_t lookup(std::uint32_t) { return 0; } }
+namespace opendojo::subsystems {
+std::uintptr_t lookup(std::uint32_t) {
+    return 0;
+}
+}  // namespace opendojo::subsystems

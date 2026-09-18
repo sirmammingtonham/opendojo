@@ -586,7 +586,11 @@ void draw_recordings_tab() {
                                   sizeof(g_state.slot_label_mirror[i]), "%s", live.c_str());
                 }
                 ImGui::PushID(static_cast<int>(i));
-                ImGui::SetNextItemWidth(-FLT_MIN);
+                // Match the text-only rows and stay inside the table cell.
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.0f, 0.0f));
+                ImGui::SetNextItemWidth(
+                    (std::max)(1.0f, (std::min)(ImGui::GetContentRegionAvail().x,
+                                                ImGui::GetFontSize() * 14.0f)));
                 if (ImGui::InputTextWithHint("##slot_name", "unnamed", g_state.export_slot_names[i],
                                              sizeof(g_state.export_slot_names[i]))) {
                     // Apply on every keystroke. practice_rename polls
@@ -597,6 +601,8 @@ void draw_recordings_tab() {
                                   sizeof(g_state.slot_label_mirror[i]), "%s",
                                   g_state.export_slot_names[i]);
                 }
+                ImGui::PopStyleVar();
+                if (ImGui::IsItemHovered() && !live.empty()) ImGui::SetTooltip("%s", live.c_str());
                 nav_recenter();
                 ImGui::PopID();
 

@@ -8,6 +8,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+#include <map>
 #include "../src/signatures.cpp"
 
 namespace {
@@ -50,7 +51,11 @@ int wmain(int argc, wchar_t** argv) {
               "usage: native_layout_tests GAME.exe [relocated|conflict|format|context]");
         const std::wstring mode = argc == 3 ? argv[2] : L"current";
         check(mode == L"current" || mode == L"relocated" || mode == L"conflict" ||
-                  mode == L"format" || mode == L"context" || mode == L"runtime" || mode == L"weak",
+                  mode == L"format" || mode == L"context" || mode == L"runtime" ||
+                  mode == L"weak" || mode == L"structural" || mode == L"join_api" ||
+                  mode == L"join_bypass" || mode == L"cleanup_bypass" ||
+                  mode == L"ambiguous_update" || mode == L"instruction_shift" ||
+                  mode == L"movelist_layout" || mode == L"movelist_conflict",
               "unknown test mode");
         const bool relocated = mode == L"relocated";
         std::ifstream input(std::filesystem::path(argv[1]), std::ios::binary | std::ios::ate);
@@ -94,6 +99,25 @@ int wmain(int argc, wchar_t** argv) {
         }
         // Historical image addresses are TEST FIXTURES ONLY. Mutate an inert copy,
         // verifying each original operand before simulating a patch. Never run this code.
+        const auto relocation = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+        for (std::size_t at = 0; at < relocation.Size;) {
+            check(relocation.VirtualAddress + at + sizeof(IMAGE_BASE_RELOCATION) <= image_size,
+                  "invalid relocation block");
+            const auto block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(
+                game_image + relocation.VirtualAddress + at);
+            check(block->SizeOfBlock >= sizeof(*block) &&
+                      block->SizeOfBlock <= relocation.Size - at,
+                  "invalid relocation size");
+            const auto entries = reinterpret_cast<const WORD*>(block + 1);
+            for (std::size_t i = 0; i < (block->SizeOfBlock - sizeof(*block)) / 2; ++i) {
+                if ((entries[i] >> 12) != IMAGE_REL_BASED_DIR64) continue;
+                const auto offset = block->VirtualAddress + (entries[i] & 0xFFF);
+                check(offset <= image_size - 8, "relocation outside image");
+                *reinterpret_cast<std::uint64_t*>(game_image + offset) +=
+                    game_image - nt->OptionalHeader.ImageBase;
+            }
+            at += block->SizeOfBlock;
+        }
         auto change = [&](std::uint64_t address, std::uint64_t before, std::uint64_t after,
                           std::size_t width) {
             const auto rva = address - 0x140000000ull;
@@ -166,9 +190,69 @@ int wmain(int argc, wchar_t** argv) {
         } else if (mode == L"context") {
             change(0x141909760 + 23, 0xE9, 0x90, 1);
         }
-        *reinterpret_cast<std::uintptr_t*>(game_image + 0x6D5BB90) = reinterpret_cast<std::uintptr_t>(&GetCurrentThreadId);
+        *reinterpret_cast<std::uintptr_t*>(game_image + 0x6D5BB90) =
+            reinterpret_cast<std::uintptr_t>(&GetCurrentThreadId);
+        *reinterpret_cast<std::uintptr_t*>(game_image + 0x6D5B3D8) =
+            reinterpret_cast<std::uintptr_t>(&ReleaseSemaphore);
+        *reinterpret_cast<std::uintptr_t*>(game_image + 0x6D5B3E0) =
+            reinterpret_cast<std::uintptr_t>(&WaitForSingleObject);
+        *reinterpret_cast<std::uintptr_t*>(game_image + 0x6D5B400) =
+            reinterpret_cast<std::uintptr_t>(&SwitchToFiber);
         if (mode == L"runtime") *reinterpret_cast<std::uintptr_t*>(game_image + 0x6D5BB90) = 0;
+        if (mode == L"ambiguous_update") {
+            // A second semantically valid candidate must disable dispatch. Clone the
+            // wrapper into an existing 502-byte unwind range in this inert image only.
+            const auto source = game_image + 0x5BC54A0;
+            const auto destination = game_image + 0x30A5C10;
+            const auto fn = opendojo::native_scan::decode(source, source + 196);
+            check(bool(fn), "cannot decode wrapper fixture");
+            std::memset(reinterpret_cast<void*>(destination), 0x90, 502);
+            for (const auto& instruction : fn.instructions) {
+                auto data = instruction.bytes;
+                const auto new_address = destination + instruction.address - source;
+                const auto& d = instruction.decoded;
+                if (instruction.rip()) {
+                    const auto displacement =
+                        static_cast<std::int32_t>(instruction.rip() - new_address - d.len);
+                    std::memcpy(data.data() + d.len - 4, &displacement, 4);
+                } else if (d.flags & F_RELATIVE && d.flags & F_IMM32) {
+                    auto target = instruction.relative();
+                    if (target >= source && target < source + 196)
+                        target = destination + target - source;
+                    const auto displacement =
+                        static_cast<std::int32_t>(target - new_address - d.len);
+                    std::memcpy(data.data() + d.len - 4, &displacement, 4);
+                }
+                std::memcpy(reinterpret_cast<void*>(new_address), data.data(), d.len);
+            }
+        }
+        if (mode == L"structural") {
+            // Equivalent alignment encoding and independent prologue-store ordering.
+            change(0x141760B0B, 0x0000441F0Full, 0x9090909090ull, 5);
+            change(0x14305C8F5, 0x00841F0F666666ull, 0x9090909090909090ull, 8);
+            change(0x14305C8FD, 0, 0x909090, 3);
+            change(0x1430A5C10, 0x10245C8948ull, 0x1824748948ull, 5);
+            change(0x1430A5C15, 0x1824748948ull, 0x10245C8948ull, 5);
+            // A field in unrelated timeout bookkeeping moves consistently.
+            change(0x145BC54CE, 0x157C, 0x1584, 4);
+            change(0x145BC551F, 0x157C, 0x1584, 4);
+        }
+        if (mode == L"join_api")
+            *reinterpret_cast<std::uintptr_t*>(game_image + 0x6D5B3E0) =
+                reinterpret_cast<std::uintptr_t>(&ReleaseSemaphore);
+        if (mode == L"join_bypass")
+            change(0x141760B47, 0x75, 0x75 + (0x141760BEA - 0x141760BBD), 1);
+        if (mode == L"cleanup_bypass") change(0x145BC554D, 5, 9, 1);
         if (mode == L"weak") change(0x1431B6D30 + 33, 4, 8, 1);
+        if (mode == L"movelist_layout" || mode == L"movelist_conflict") {
+            change(0x141909600 + 56, 0x148, 0x150, 4);
+            if (mode == L"movelist_layout") {
+                change(0x141909600 + 20, 0x63E7063E7063E707ull, 7027331075698876807ull, 8);
+                change(0x14191A8B0 + 23, 0x47C, 0x490, 4);
+                change(0x141909600 + 17, 8, 16, 1);
+                change(0x141909C00 + 19, 0x44, 0x50, 1);
+            }
+        }
         const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
         check(directory.VirtualAddress < image_size &&
                   directory.Size <= image_size - directory.VirtualAddress &&
@@ -178,8 +262,115 @@ int wmain(int argc, wchar_t** argv) {
         check(RtlAddFunctionTable(unwind, directory.Size / sizeof(RUNTIME_FUNCTION), game_image) !=
                   0,
               "cannot register unwind table");
+        std::vector<RUNTIME_FUNCTION> shifted_unwind;
+        if (mode == L"instruction_shift") {
+            using namespace opendojo::native_scan;
+            struct Clone {
+                Function fn;
+                RUNTIME_FUNCTION unwind;
+                std::uintptr_t begin, end;
+            };
+            std::vector<Clone> clones;
+            std::map<std::uintptr_t, std::uintptr_t> moved;
+            auto cursor = game_image + 0xA50000;
+            const auto limit = game_image + 0xA60000;
+            // These are fixture addresses, never shipping discovery inputs. Move whole
+            // functions, insert alignment, and widen branches while preserving targets.
+            for (auto rva :
+                 {0x5C9BE40, 0x5E7FD50, 0x18EDA70, 0x19161F0, 0x191A8B0, 0x1924510, 0x191FE10,
+                  0x18B0010, 0x18842A0, 0x18F0FA0, 0x30A9BA0, 0x3186820, 0x2FF81B0}) {
+                auto fn = function(opendojo::signatures::code_image(), game_image + rva);
+                check(bool(fn) && fn.begin == game_image + rva,
+                      "shift fixture function unavailable");
+                DWORD64 base = 0;
+                auto entry = RtlLookupFunctionEntry(fn.begin, &base, nullptr);
+                check(entry != nullptr, "shift fixture missing unwind");
+                auto primary = root(opendojo::signatures::code_image(), *entry);
+                check(primary.EndAddress > primary.BeginAddress,
+                      "shift fixture missing primary unwind");
+                const auto begin = cursor;
+                for (const auto& i : fn.instructions) {
+                    moved[i.address] = cursor;
+                    const auto& d = i.decoded;
+                    cursor += d.opcode >= 0x70 && d.opcode <= 0x7f ? 6
+                              : d.opcode == 0xeb                   ? 5
+                                                                   : d.len;
+                    if (i.address == fn.begin) ++cursor;
+                }
+                check(cursor < limit, "shift fixture scratch exhausted");
+                clones.push_back({std::move(fn), primary, begin, cursor});
+                cursor = (cursor + 15) & ~std::uintptr_t{15};
+            }
+            RtlDeleteFunctionTable(unwind);
+            for (std::size_t i = 0; i < directory.Size / sizeof(RUNTIME_FUNCTION); ++i)
+                if (unwind[i].EndAddress <= 0xA50000 || unwind[i].BeginAddress >= 0xA60000)
+                    shifted_unwind.push_back(unwind[i]);
+            std::memset(reinterpret_cast<void*>(game_image + 0xA50000), 0xCC, 0x10000);
+            auto target = [&](std::uintptr_t at) {
+                auto it = moved.find(at);
+                return it == moved.end() ? at : it->second;
+            };
+            for (const auto& clone : clones) {
+                for (const auto& i : clone.fn.instructions) {
+                    const auto at = moved.at(i.address);
+                    const auto& d = i.decoded;
+                    auto bytes = i.bytes;
+                    std::size_t instruction_size = d.len;
+                    if (d.opcode >= 0x70 && d.opcode <= 0x7f) {
+                        bytes[0] = 0x0F;
+                        bytes[1] = 0x80 | (d.opcode & 15);
+                        instruction_size = 6;
+                    } else if (d.opcode == 0xEB) {
+                        bytes[0] = 0xE9;
+                        instruction_size = 5;
+                    }
+                    if (d.flags & F_RELATIVE) {
+                        check(instruction_size >= 5, "unsupported relative instruction in fixture");
+                        const auto displacement =
+                            static_cast<std::int32_t>(target(i.relative()) - at - instruction_size);
+                        std::memcpy(bytes.data() + instruction_size - 4, &displacement, 4);
+                    } else if (d.modrm_mod == 0 && d.modrm_rm == 5 && (d.flags & F_MODRM)) {
+                        const auto immediate = d.flags & F_IMM64   ? 8
+                                               : d.flags & F_IMM32 ? 4
+                                               : d.flags & F_IMM16 ? 2
+                                               : d.flags & F_IMM8  ? 1
+                                                                   : 0;
+                        const auto displacement =
+                            static_cast<std::int32_t>(target(i.rip()) - at - instruction_size);
+                        std::memcpy(bytes.data() + instruction_size - immediate - 4, &displacement,
+                                    4);
+                    }
+                    std::memcpy(reinterpret_cast<void*>(at), bytes.data(), instruction_size);
+                    if (i.address == clone.fn.begin)
+                        *reinterpret_cast<unsigned char*>(at + instruction_size) = 0x90;
+                }
+                std::memset(reinterpret_cast<void*>(clone.fn.begin), 0xCC,
+                            clone.fn.end - clone.fn.begin);
+                shifted_unwind.push_back({static_cast<DWORD>(clone.begin - game_image),
+                                          static_cast<DWORD>(clone.end - game_image),
+                                          clone.unwind.UnwindData});
+            }
+            // Relocate vtable entries and other absolute code references like the loader.
+            for (std::size_t at = 0; at < relocation.Size;) {
+                auto block = reinterpret_cast<const IMAGE_BASE_RELOCATION*>(
+                    game_image + relocation.VirtualAddress + at);
+                const auto entries = reinterpret_cast<const WORD*>(block + 1);
+                for (std::size_t i = 0; i < (block->SizeOfBlock - sizeof(*block)) / 2; ++i) {
+                    if ((entries[i] >> 12) != IMAGE_REL_BASED_DIR64) continue;
+                    auto& pointer = *reinterpret_cast<std::uintptr_t*>(
+                        game_image + block->VirtualAddress + (entries[i] & 0xFFF));
+                    pointer = target(pointer);
+                }
+                at += block->SizeOfBlock;
+            }
+            std::sort(shifted_unwind.begin(), shifted_unwind.end(),
+                      [](auto a, auto b) { return a.BeginAddress < b.BeginAddress; });
+            unwind = shifted_unwind.data();
+            check(RtlAddFunctionTable(unwind, static_cast<DWORD>(shifted_unwind.size()),
+                                      game_image) != 0,
+                  "cannot register shifted unwind table");
+        }
         const auto resolved = opendojo::signatures::resolve_all();
-        RtlDeleteFunctionTable(unwind);
         check(opendojo::signatures::native_text_abi_supported(game_image + 0x2C491B0),
               "FString ABI rejected");
         change(0x142E88110 + 53, 8, 16, 1);
@@ -190,22 +381,35 @@ int wmain(int argc, wchar_t** argv) {
         change(0x1431B7D00 + 24, 8, 16, 1);
         check(!opendojo::signatures::native_object_array_abi_supported(game_image + 0x31BAB60),
               "changed object-array ABI accepted");
+        RtlDeleteFunctionTable(unwind);
         const auto runtime = opendojo::signatures::runtime_layout();
-        if (mode == L"runtime" || mode == L"weak") {
-            check(!resolved && !runtime.update && !runtime.weak_assign, "unsupported runtime contract accepted");
+        if (mode == L"runtime" || mode == L"weak" || mode == L"join_api" ||
+            mode == L"join_bypass" || mode == L"cleanup_bypass" || mode == L"ambiguous_update") {
+            check(!resolved, "unsupported contract accepted");
+            if (mode == L"weak")
+                check(runtime.update && !runtime.weak_assign, "menu failure disabled core imports");
+            else
+                check(!runtime.update && runtime.weak_assign,
+                      "thread failure disabled independent object discovery");
             std::wcout << L"Native runtime rejection passed: " << mode << L"\n";
             VirtualFree(reinterpret_cast<void*>(game_image), 0, MEM_RELEASE);
             return 0;
         }
-        check(runtime.update == game_image + 0x5BC54A0 && runtime.game_thread_id == game_image + 0x993BCD8 &&
-              runtime.engine_free == game_image + 0x2EF7810 && runtime.weak_assign == game_image + 0x31B6D30 &&
-              runtime.weak_valid == game_image + 0x31BBFA0 && runtime.weak_get == game_image + 0x31BA7E0,
+        check(runtime.update == game_image + 0x5BC54A0 &&
+                  runtime.game_thread_id == game_image + 0x993BCD8 &&
+                  runtime.engine_free == game_image + 0x2EF7810 &&
+                  runtime.weak_assign == game_image + 0x31B6D30 &&
+                  runtime.weak_valid == game_image + 0x31BBFA0 &&
+                  runtime.weak_get == game_image + 0x31BA7E0,
               "native update/weak-object helpers did not resolve");
         const auto p = opendojo::signatures::player_layout();
         const auto r = opendojo::signatures::reflection_layout();
         const auto state = opendojo::signatures::recording_state_layout();
         const auto session = opendojo::signatures::session_layout();
-        if (mode == L"conflict") {
+        if (mode == L"movelist_conflict") {
+            check(!resolved && !opendojo::signatures::movelist_layout().element_stride,
+                  "inconsistent movelist division/indexing accepted");
+        } else if (mode == L"conflict") {
             check(!resolved && !p.p1 && !r.object_class && !state.counter && !session.player_flag &&
                       !opendojo::signatures::slot_flag_base() &&
                       !opendojo::signatures::live_recordings_supported(),
@@ -218,6 +422,13 @@ int wmain(int argc, wchar_t** argv) {
                   "invalid context call chain accepted");
         } else {
             check(resolved, "at least one native layout did not resolve");
+            const auto moves = opendojo::signatures::movelist_layout();
+            const bool moved_list = mode == L"movelist_layout";
+            check(moves.element_stride == (moved_list ? 0x150u : 0x148u) &&
+                      moves.human_side == (moved_list ? 0x490u : 0x47Cu) &&
+                      moves.move_ids == (moved_list ? 0x50u : 0x44u) &&
+                      moves.vector_end == (moved_list ? 16u : 8u),
+                  "unexpected movelist layout");
             check(p.p1 == (relocated ? 0x40u : 0x30u) && p.p2 == (relocated ? 0x48u : 0x38u) &&
                       p.character == (relocated ? 0x188u : 0x168u) &&
                       p.native_bias == (relocated ? 0xA0u : 0x90u),

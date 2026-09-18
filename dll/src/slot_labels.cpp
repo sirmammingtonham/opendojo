@@ -12,6 +12,7 @@ std::mutex g_mtx;
 
 void set(std::size_t idx, std::string name) {
     if (idx >= COUNT) return;
+    if (name.find_first_not_of(" \t\r\n") == std::string::npos) name.clear();
     std::lock_guard<std::mutex> lk(g_mtx);
     g_names[idx] = std::move(name);
 }
