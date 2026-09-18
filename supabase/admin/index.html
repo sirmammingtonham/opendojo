@@ -678,9 +678,9 @@ function headers(extra) {
 }
 
 async function supa(path, opts = {}) {
-    const r = await fetch(baseUrl + path, Object.assign({
+    const r = await fetch(baseUrl + path, Object.assign({}, opts, {
         headers: headers(opts.headers),
-    }, opts));
+    }));
     if (!r.ok) {
         const body = await r.text();
         throw new Error(`${r.status}: ${body}`);
