@@ -12,6 +12,9 @@ Deno.test("message audiences, version boundaries, and legacy clients", async () 
         ]) {
             await db.exec(await Deno.readTextFile(new URL(`../migrations/${migration}`, import.meta.url)));
         }
+        const unvalidated = await db.query(`select conname from pg_constraint
+            where conrelid = 'public.service_messages'::regclass and not convalidated`);
+        if (unvalidated.rows.length) throw new Error("Migration left message constraints unvalidated");
         await db.exec(`
             insert into service_messages (message, min_version, max_version, created_at) values
             ('global', null, null, '2026-01-01'),

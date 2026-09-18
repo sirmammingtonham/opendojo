@@ -1,10 +1,14 @@
 -- Update notices are explicit metadata, never inferred from announcement text.
+-- Already applied in production with immediate constraint validation.
+-- Preserve the executed SQL; suppress only the already-applied constraints.
 alter table public.service_messages
     add column update_version text,
     drop constraint service_messages_message_check,
+    -- squawk-ignore constraint-missing-not-valid
     add constraint service_messages_message_check
         check (char_length(message) <= 200 and
             (char_length(btrim(message)) > 0 or update_version is not null)),
+    -- squawk-ignore constraint-missing-not-valid
     add constraint service_messages_update_version_valid
         check (update_version is null or public.message_version_key(update_version) is not null);
 

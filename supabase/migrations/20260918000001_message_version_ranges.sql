@@ -8,13 +8,18 @@ as $$
         then string_to_array(version, '.')::integer[] end;
 $$;
 
+-- Already applied in production with immediate constraint validation.
+-- Preserve the executed SQL; suppress only the already-applied constraints.
 alter table public.service_messages
     add column min_version text,
     add column max_version text,
+    -- squawk-ignore constraint-missing-not-valid
     add constraint service_messages_min_version_valid
         check (min_version is null or public.message_version_key(min_version) is not null),
+    -- squawk-ignore constraint-missing-not-valid
     add constraint service_messages_max_version_valid
         check (max_version is null or public.message_version_key(max_version) is not null),
+    -- squawk-ignore constraint-missing-not-valid
     add constraint service_messages_version_order
         check (min_version is null or max_version is null or
             public.message_version_key(min_version) <= public.message_version_key(max_version));
