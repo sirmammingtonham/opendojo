@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -113,31 +114,17 @@ std::string_view strip_comment(std::string_view s) {
 }
 
 long long parse_hex(std::string_view s) {
-    if (s.empty()) return -1;
+    if (s.empty() || s.front() == '-') return -1;
     long long n = 0;
-    for (char c : s) {
-        int d;
-        if (c >= '0' && c <= '9')
-            d = c - '0';
-        else if (c >= 'a' && c <= 'f')
-            d = 10 + (c - 'a');
-        else if (c >= 'A' && c <= 'F')
-            d = 10 + (c - 'A');
-        else
-            return -1;
-        n = (n << 4) | d;
-    }
-    return n;
+    const auto r = std::from_chars(s.data(), s.data() + s.size(), n, 16);
+    return r.ec == std::errc{} && r.ptr == s.data() + s.size() ? n : -1;
 }
 
 long long parse_dec(std::string_view s) {
-    if (s.empty()) return -1;
+    if (s.empty() || s.front() == '-') return -1;
     long long n = 0;
-    for (char c : s) {
-        if (c < '0' || c > '9') return -1;
-        n = n * 10 + (c - '0');
-    }
-    return n;
+    const auto r = std::from_chars(s.data(), s.data() + s.size(), n);
+    return r.ec == std::errc{} && r.ptr == s.data() + s.size() ? n : -1;
 }
 
 std::vector<std::string_view> split_ws(std::string_view s) {
@@ -259,6 +246,11 @@ bool decode_event_line(std::string_view line, std::array<std::uint8_t, 4>& ev, s
         if (n < 0) {
             err = "bad hex value in annotation: ";
             err.append(toks[i].data(), toks[i].size());
+            return false;
+        }
+        if (((key == "mark" || key == "btn_raw" || key == "dir_raw") && n > 0xF) ||
+            (key == "aux" && n > 0xFF)) {
+            err = "annotation out of range";
             return false;
         }
 
@@ -424,23 +416,21 @@ std::string encode_text(const Drill& d) {
     char buf[256];
     out += "# OpenDojo drill\n";
     out += "name:         " + one_line(d.name) + "\n";
-    out += "description:  " + one_line(d.description) + "\n";
-    // Older mods retain the flattened fallback. Explicit continuation fields
-    // preserve newlines without letting user text become headers or recordings.
-    if (d.description.find_first_of("\r\n") != std::string::npos) {
-        std::size_t pos = 0;
-        do {
-            auto end = d.description.find_first_of("\r\n", pos);
-            if (end == std::string::npos) end = d.description.size();
-            out += "description_line: |" +
-                   one_line(std::string_view(d.description).substr(pos, end - pos)) + "\n";
-            if (end == d.description.size()) break;
-            pos = end + 1;
-            if (d.description[end] == '\r' && pos < d.description.size() &&
-                d.description[pos] == '\n')
-                ++pos;
-        } while (pos <= d.description.size());
-    }
+    // Preserve first-line spacing; published older mods ignore this key.
+    out += "description_format: pipe_lines\n";
+    std::size_t pos = 0;
+    bool first_line = true;
+    do {
+        auto end = d.description.find_first_of("\r\n", pos);
+        if (end == std::string::npos) end = d.description.size();
+        out += first_line ? "description: " : "description_line: |";
+        out += one_line(std::string_view(d.description).substr(pos, end - pos)) + "\n";
+        first_line = false;
+        if (end == d.description.size()) break;
+        pos = end + 1;
+        if (d.description[end] == '\r' && pos < d.description.size() && d.description[pos] == '\n')
+            ++pos;
+    } while (pos <= d.description.size());
     if (!d.author_handle.empty()) out += "author_handle: " + one_line(d.author_handle) + "\n";
     std::snprintf(buf, sizeof(buf), "character:    %s\n",
                   d.character.empty() ? "unknown" : d.character.c_str());
@@ -588,9 +578,9 @@ TextResult decode_text(std::string_view text) {
                         return result;
                     }
                 } else if (key == "move_id") {
-                    try {
-                        current.move_id = static_cast<std::uint32_t>(std::stoul(std::string(val)));
-                    } catch (...) {
+                    const auto parsed =
+                        std::from_chars(val.data(), val.data() + val.size(), current.move_id);
+                    if (parsed.ec != std::errc{} || parsed.ptr != val.data() + val.size()) {
                         result.error = "bad move_id: ";
                         result.error.append(val.data(), val.size());
                         return result;

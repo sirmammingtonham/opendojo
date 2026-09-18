@@ -107,6 +107,21 @@ int main() {
     std::vector<std::size_t> targets;
     reset();
     check(slot::import_recordings({live, move}, true, targets) == slot::WriteStatus::Ok);
+    check(slot::clear_all() == slot::WriteStatus::Ok);
+    for (std::size_t i = 0; i < slot::USER_SLOTS; ++i) check(flag(i) == slot::FLAG_EMPTY);
+    check((memory::read_u32(address(singleton)) & session_fields.active_mask) == 0);
+    check(memory::read_u32(address(singleton) + recording_fields.counter) == 0);
+    check(slot::clear_all() == slot::WriteStatus::Ok);  // already empty
+    practice = false;
+    check(slot::clear_all() == slot::WriteStatus::NotInPracticeMode);
+    reset();
+    check(slot::import_recordings({live, move}, true, targets) == slot::WriteStatus::Ok);
+    owner_context = false;
+    check(slot::clear_all() == slot::WriteStatus::StateChanged);
+    check(flag(0) == slot::FLAG_LIVE && flag(1) == slot::FLAG_MOVELIST);
+    owner_context = true;
+    reset();
+    check(slot::import_recordings({live, move}, true, targets) == slot::WriteStatus::Ok);
     check(targets == std::vector<std::size_t>({0, 1}));
     check(flag(0) == slot::FLAG_LIVE && flag(1) == slot::FLAG_MOVELIST && flag(2) == 0);
     check(pool[2] == 42);

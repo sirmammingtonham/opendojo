@@ -122,10 +122,18 @@ bool refresh_token(Token& out) {
         return false;
     }
     if (res.status < 200 || res.status >= 300) {
-        // 4xx on refresh means the refresh token was revoked or the
-        // user was deleted; surrender and force a fresh anon signup.
-        OPENDOJO_LOG("cloud/auth: refresh HTTP %ld — wiping local token", res.status);
-        out = {};
+        // Only explicit terminal auth errors justify abandoning the identity.
+        // In particular, proxy 429/403, 5xx and transport failures are retryable.
+        const auto error = nlohmann::json::parse(res.body, nullptr, false);
+        std::string code;
+        if (error.is_object() && error.contains("code") && error["code"].is_string())
+            code = error["code"].get<std::string>();
+        const bool terminal = (res.status == 400 || res.status == 401) &&
+                              (code == "refresh_token_not_found" ||
+                               code == "refresh_token_already_used" ||
+                               code == "session_not_found" || code == "user_not_found");
+        OPENDOJO_LOG("cloud/auth: refresh HTTP %ld (terminal=%d)", res.status, terminal);
+        if (terminal) out = {};
         return false;
     }
     // The refresh response carries forward the same user id, but
@@ -159,7 +167,8 @@ bool ensure_valid() {
             g_signup_failures = 0;  // network OK, reset backoff
             return true;
         }
-        // fall through to sign-up
+        if (!g_token.refresh.empty()) return false;
+        // An explicitly invalidated identity may be replaced below.
     }
 
     // Backoff: if we've struck out repeatedly on /signup recently

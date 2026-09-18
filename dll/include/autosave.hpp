@@ -45,5 +45,7 @@ void flush_now();
 // upcoming character is detected as a fresh entry and the normal
 // autoload flow (round-active wait → load_drill) kicks off.
 void on_practice_entered();
+// A manual slot operation supersedes pending autoload/recovery for this session.
+void on_manual_action();
 
 }  // namespace opendojo::autosave

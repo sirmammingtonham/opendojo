@@ -304,14 +304,14 @@ bool capture(std::array<CapturedSlot, USER_SLOTS>& out) {
     return true;
 }
 
-WriteStatus import_recordings(const std::vector<drill::Recording>& recordings, bool replace,
-                              std::vector<std::size_t>& targets) {
+static WriteStatus apply_recordings(const std::vector<drill::Recording>& recordings, bool replace,
+                                    std::vector<std::size_t>& targets) {
     const auto flags_base = signatures::slot_flag_base();
     targets.clear();
     if (!game_thread::is_current()) return WriteStatus::StateChanged;
     if (!flags_base) return WriteStatus::StateChanged;
     const auto layout = signatures::movelist_layout();
-    if (recordings.empty() || recordings.size() > USER_SLOTS) return WriteStatus::InvalidRecording;
+    if (recordings.size() > USER_SLOTS) return WriteStatus::InvalidRecording;
     bool live = false, movelist = false;
     for (const auto& rec : recordings) {
         if (rec.kind == drill::Kind::Live) {
@@ -415,6 +415,20 @@ WriteStatus import_recordings(const std::vector<drill::Recording>& recordings, b
         case WriteBatch::Result::Ok: targets = std::move(selected); return WriteStatus::Ok;
     }
     return WriteStatus::StateChanged;
+}
+
+WriteStatus import_recordings(const std::vector<drill::Recording>& recordings, bool replace,
+                              std::vector<std::size_t>& targets) {
+    if (recordings.empty()) {
+        targets.clear();
+        return WriteStatus::InvalidRecording;
+    }
+    return apply_recordings(recordings, replace, targets);
+}
+
+WriteStatus clear_all() {
+    std::vector<std::size_t> targets;
+    return apply_recordings({}, true, targets);
 }
 
 bool capture_snapshot(std::array<CapturedSlot, USER_SLOTS>& out, std::string_view character) {

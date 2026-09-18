@@ -20,6 +20,8 @@ void invalidate();
 // the top of each draw().
 void queue_toast(std::string text, bool is_error);
 void queue_drills_refresh();
+// Publish form changes only after a native operation has completed successfully.
+void queue_export_form(std::string name, std::string description, bool cleared = false);
 
 // Call immediately after a widget that lives in a scrollable region.
 // On the frame gamepad/keyboard nav focuses this widget, scrolls the

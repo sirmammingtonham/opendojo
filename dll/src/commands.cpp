@@ -1,4 +1,5 @@
 #include "commands.hpp"
+#include "autosave.hpp"
 #include "file_io.hpp"
 
 #include <windows.h>
@@ -61,10 +62,6 @@ std::string read_whole_file(const std::filesystem::path& p) {
     f.read(out.data(), out.size());
     if (!f) return {};  // A truncated or failed read must not become a partial drill.
     return out;
-}
-
-bool write_whole_file(const std::filesystem::path& p, const void* data, std::size_t n) {
-    return opendojo::file_io::replace_file(p, std::string_view(static_cast<const char*>(data), n));
 }
 
 // Parse just enough of a drill file to populate a DrillHeader. Reads up to
@@ -136,17 +133,20 @@ bool parse_header_only(const std::filesystem::path& path, DrillHeader& out) {
     return true;
 }
 
-std::filesystem::path resolve_collision(const std::filesystem::path& dir, std::string_view slug) {
-    auto base = std::filesystem::path(std::wstring(slug.begin(), slug.end()));
-    auto candidate = dir / (base.wstring() + L".drill.txt");
-    if (!std::filesystem::exists(candidate)) return candidate;
-    for (int i = 2; i < 1000; ++i) {
-        wchar_t suffix[16];
-        swprintf_s(suffix, L"_%d.drill.txt", i);
-        candidate = dir / (base.wstring() + suffix);
-        if (!std::filesystem::exists(candidate)) return candidate;
+std::filesystem::path write_unique_drill(const std::filesystem::path& dir, std::string_view slug,
+                                         std::string_view content, std::string& error) {
+    const std::wstring base(slug.begin(), slug.end());
+    for (int i = 1; i < 1000; ++i) {
+        auto candidate = dir / (base + (i == 1 ? L"" : L"_" + std::to_wstring(i)) + L".drill.txt");
+        const auto result = file_io::create_file(candidate, content);
+        if (result == file_io::CreateResult::Saved) return candidate;
+        if (result == file_io::CreateResult::Failed) {
+            error = "failed to write drill file";
+            return {};
+        }
     }
-    return {};  // collision storm — caller will treat as failure
+    error = "filename collision storm - pick a different name";
+    return {};
 }
 
 std::string timestamp_name() {
@@ -230,10 +230,13 @@ LoadResult load_drill(const std::filesystem::path& path, LoadMode mode) {
         const bool queued = opendojo::game_thread::enqueue([d = std::move(d), mode,
                                                             path](bool eligible) {
             try {
+                if (eligible) opendojo::autosave::on_manual_action();
                 const auto result =
                     eligible
                         ? apply_drill(d, mode, path)
                         : LoadResult{false, "load cancelled: practice changed or request expired"};
+                if (result.ok && !path.filename().string().starts_with("_autosave_"))
+                    opendojo::menu::queue_export_form(d.name, d.description);
                 opendojo::menu::queue_toast(result.message, !result.ok);
             } catch (...) {
                 OPENDOJO_LOG("load_drill: queued import threw; recording state may be incomplete");
@@ -309,15 +312,8 @@ ExportResult export_current_slots(std::string_view drill_name, std::string_view 
 
     auto text = opendojo::drill::encode_text(d);
     auto slug = opendojo::drill::slugify(d.name);
-    auto path = resolve_collision(drills_dir(), slug);
-    if (path.empty()) {
-        r.message = "filename collision storm - pick a different name";
-        return r;
-    }
-    if (!write_whole_file(path, text.data(), text.size())) {
-        r.message = "failed to write drill file";
-        return r;
-    }
+    auto path = write_unique_drill(drills_dir(), slug, text, r.message);
+    if (path.empty()) return r;
 
     char buf[160];
     std::snprintf(buf, sizeof(buf), "exported %zu recordings", d.recordings.size());
@@ -351,15 +347,8 @@ CopyResult copy_drill(const std::filesystem::path& src, std::string_view new_nam
     }
     auto encoded = opendojo::drill::encode_text(d);
     auto slug = opendojo::drill::slugify(d.name);
-    auto path = resolve_collision(drills_dir(), slug);
-    if (path.empty()) {
-        r.message = "filename collision storm - pick a different name";
-        return r;
-    }
-    if (!write_whole_file(path, encoded.data(), encoded.size())) {
-        r.message = "failed to write drill file";
-        return r;
-    }
+    auto path = write_unique_drill(drills_dir(), slug, encoded, r.message);
+    if (path.empty()) return r;
     r.ok = true;
     r.path = path;
     r.message = "saved as new drill";
@@ -456,11 +445,6 @@ SaveResult save_drill_text(std::string_view display_name, std::string_view conte
         return r;
     }
     auto slug = opendojo::drill::slugify(display_name);
-    auto path = resolve_collision(drills_dir(), slug);
-    if (path.empty()) {
-        r.message = "filename collision storm — pick a different name";
-        return r;
-    }
     // Stamp the originating cloud id into the header when present, so the
     // Cloud tab can recognize this drill as already in the library.
     std::string stamped;
@@ -469,10 +453,8 @@ SaveResult save_drill_text(std::string_view display_name, std::string_view conte
         stamped = stamp_cloud_id(content, cloud_id);
         to_write = stamped;
     }
-    if (!write_whole_file(path, to_write.data(), to_write.size())) {
-        r.message = "failed to write drill file";
-        return r;
-    }
+    auto path = write_unique_drill(drills_dir(), slug, to_write, r.message);
+    if (path.empty()) return r;
     r.ok = true;
     r.path = path;
     r.message = "saved to " + path.filename().string();

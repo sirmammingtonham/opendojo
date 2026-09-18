@@ -157,18 +157,29 @@ export function drillShapeError(content: string, declared: number): string | nul
     // Cap line count + per-line length. Walk once.
     let lines = 0;
     let lineStart = 0;
+    let inHeader = true;
+    const lineError = (end: number): string | null => {
+        const line = content.slice(lineStart, end);
+        if (line.startsWith("---")) inHeader = false;
+        // Existing clients use one description line; new clients may also use
+        // literal continuation fields. Both carry the same bounded metadata.
+        const description = inHeader && /^description(?:_line)?:/.test(line);
+        const limit = description ? 4096 + 32 : MAX_CONTENT_LINE_LEN;
+        return line.length > limit ? `content has a line longer than ${limit} chars` : null;
+    };
     for (let i = 0; i < content.length; ++i) {
         if (content.charCodeAt(i) === 0x0a /* \n */) {
             ++lines;
-            if (i - lineStart > MAX_CONTENT_LINE_LEN) {
-                return `content has a line longer than ${MAX_CONTENT_LINE_LEN} chars`;
-            }
+            const error = lineError(i);
+            if (error) return error;
             lineStart = i + 1;
             if (lines > MAX_CONTENT_LINES) {
                 return `content has more than ${MAX_CONTENT_LINES} lines`;
             }
         }
     }
+    const tailError = lineError(content.length);
+    if (tailError) return tailError;
 
     // Bound the recordings header search to the header section so an
     // attacker can't put a misleading "recordings: 1" in a later

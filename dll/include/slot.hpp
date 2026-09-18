@@ -71,6 +71,8 @@ const char* describe(WriteStatus s);
 // write. targets is populated only on success. No game-thread atomicity implied.
 WriteStatus import_recordings(const std::vector<drill::Recording>& recordings, bool replace,
                               std::vector<std::size_t>& targets);
+// Empty every slot and stop the recording session at the game-update boundary.
+WriteStatus clear_all();
 
 // Absolute address of slot N's pool1 entry. Returns 0 if pool1 isn't
 // allocated yet or slot_idx is out of range. Used by the import path,

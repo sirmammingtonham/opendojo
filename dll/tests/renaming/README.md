@@ -64,11 +64,16 @@ boundary. Blank lines, indentation, colons, and hashes are retained. CRLF and
 CR line endings normalize to LF. A reserved header at the beginning of a line
 remains structural; the parser does not guess whether it was intended as prose.
 
-New multiline exports include the flattened `description:` fallback for older
-mods, followed by `description_line: |` fields containing each literal line.
-The pipe separates syntax from content, preserving leading/trailing whitespace
-and preventing descriptions from injecting headers or recording markers. Older
-decoders ignore those fields and keep the playable recordings.
+New exports store the first line in `description:` and subsequent lines in
+`description_line: |` fields. Everything after the pipe is literal description
+text, including leading spaces or another pipe; a bare pipe represents a blank
+line. `description_format: pipe_lines` preserves first-line spacing as well.
+The text is not duplicated.
+
+The compatibility target is the published mod, which ignores unknown header
+fields and retains the first description line while loading the recordings.
+The new reader also supports raw multiline descriptions from existing drills.
+Unpublished intermediate representations are not separate compatibility targets.
 
 Tests cover the historical decoder, library-reader parity, malicious section
 text in descriptions, NUL rejection, the 4096-byte description limit, recording

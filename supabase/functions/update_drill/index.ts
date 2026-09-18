@@ -1,3 +1,4 @@
+import { readJsonBody, BodyTooLarge } from "../_shared/body.ts";
 // update_drill - author edit of an existing drill's metadata.
 //
 // This is the SECOND privileged write path into `drills` (alongside
@@ -74,8 +75,9 @@ Deno.serve(async (req) => {
 
     let body: EditBody;
     try {
-        body = await req.json();
-    } catch {
+        body = await readJsonBody(req, MAX_EDIT_BODY_BYTES) as EditBody;
+    } catch (error) {
+        if (error instanceof BodyTooLarge) return json(413, { error: "request body too large" });
         return json(400, { error: "invalid JSON" });
     }
 

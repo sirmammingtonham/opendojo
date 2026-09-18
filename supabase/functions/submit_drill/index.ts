@@ -23,6 +23,7 @@ import {
     validate,
 } from "./validate.ts";
 import { containsBannedLanguage } from "./profanity.ts";
+import { readJsonBody, BodyTooLarge } from "../_shared/body.ts";
 
 // The function uses one key: the project's SECRET key. It both validates the
 // caller's token (getUser) and does the privileged writes - the drills /
@@ -88,8 +89,9 @@ Deno.serve(async (req) => {
 
     let body: SubmitBody;
     try {
-        body = await req.json();
-    } catch {
+        body = await readJsonBody(req, MAX_BODY_BYTES) as SubmitBody;
+    } catch (error) {
+        if (error instanceof BodyTooLarge) return json(413, { error: "request body too large" });
         return json(400, { error: "invalid JSON" });
     }
 
@@ -163,10 +165,7 @@ Deno.serve(async (req) => {
         }
     }
 
-    // Insert. The unique index on content_hash is the final guard
-    // against a race where two concurrent submits of the same content
-    // both pass the dedupe lookup above. ON CONFLICT returns the
-    // pre-existing id rather than failing.
+    // A concurrent duplicate must never update metadata or ownership.
     const { data: inserted, error: insErr } = await admin
         .from("drills")
         .upsert({
@@ -183,13 +182,20 @@ Deno.serve(async (req) => {
             difficulty:       drill.difficulty,
             dll_version:      drill.dll_version,
             uploader_id:      userId,
-        }, { onConflict: "content_hash", ignoreDuplicates: false })
+        }, { onConflict: "content_hash", ignoreDuplicates: true })
         .select("id")
-        .single();
+        .maybeSingle();
 
-    if (insErr || !inserted) {
+    if (insErr) {
         console.error("insert failed", insErr);
         return json(500, { error: "internal error" });
+    }
+
+    if (!inserted) {
+        const { data: existing, error } = await admin.from("drills")
+            .select("id").eq("content_hash", contentHash).maybeSingle();
+        if (error || !existing) return json(500, { error: "internal error" });
+        return json(200, { id: existing.id, deduped: true });
     }
 
     return json(200, { id: inserted.id, deduped: false });

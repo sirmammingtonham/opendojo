@@ -1,4 +1,5 @@
 #include "ui/menu.hpp"
+#include "ui/text_buffers.hpp"
 
 #include "imgui.h"
 
@@ -77,11 +78,11 @@ struct State {
         {};
 
     // Export form buffers.
-    char export_name[96] = "";
+    char export_name[opendojo::ui::DRILL_NAME_BUFFER_SIZE] = "";
     // Description allows newlines + a few paragraphs. Server caps at
     // 1000 chars; we give the buffer extra headroom for IME / pasted
     // text the user will trim before submitting.
-    char export_description[1024] = "";
+    char export_description[opendojo::ui::DESCRIPTION_BUFFER_SIZE] = "";
 
     // Set whenever the window transitions from hidden -> visible. Used
     // to claim window focus + set initial nav focus on the first frame
@@ -110,6 +111,9 @@ struct State {
 };
 
 State g_state;
+// Only the render thread owns the form; game-thread completion is published here.
+std::atomic<int> g_clear_result{0};  // 0: none, 2: failed
+bool g_clear_pending = false;
 
 // Pending UI effects published from background threads (cloud worker)
 // and drained at the top of each draw(). Keeping a single small mutex
@@ -122,6 +126,7 @@ struct PendingUiOps {
         bool is_error;
     };
     std::vector<QueuedToast> toasts;
+    std::vector<std::function<void()>> actions;
     std::atomic<bool> drills_dirty{false};
 };
 PendingUiOps g_pending;
@@ -186,10 +191,14 @@ bool pin_toggle_button(const char* filename, bool currently_pinned) {
 
 void drain_pending_ui_ops() {
     std::vector<PendingUiOps::QueuedToast> toasts;
+    std::vector<std::function<void()>> actions;
     {
         std::lock_guard lk(g_pending.mtx);
         toasts.swap(g_pending.toasts);
+        actions.swap(g_pending.actions);
     }
+    for (auto& action : actions)
+        action();
     if (g_pending.drills_dirty.exchange(false)) {
         g_state.drills_dirty = true;
     }
@@ -198,18 +207,6 @@ void drain_pending_ui_ops() {
     for (auto& t : toasts) {
         show_toast(std::move(t.text), t.is_error);
     }
-}
-
-// After a successful Add/Replace on a saved drill, copy its metadata
-// into the Export form. Lets a user follow "load drill → tweak →
-// re-export / upload to cloud" without retyping name + description.
-// Autosaves intentionally skip this — their names are internal
-// ("_autosave_jin") and would just be noise in the Export field.
-void seed_export_form_from(const opendojo::commands::DrillHeader& d) {
-    if (d.is_autosave) return;
-    std::snprintf(g_state.export_name, sizeof(g_state.export_name), "%s", d.name.c_str());
-    std::snprintf(g_state.export_description, sizeof(g_state.export_description), "%s",
-                  d.description.c_str());
 }
 
 void refresh_drills_if_needed() {
@@ -263,6 +260,40 @@ void draw_drills_tab() {
 
     if (ImGui::Button("Refresh")) g_state.drills_dirty = true;
     nav_recenter();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_clear_pending || !opendojo::subsystems::in_practice() ||
+                         !opendojo::game_thread::available());
+    if (ImGui::Button("Clear")) {
+        g_clear_pending = opendojo::game_thread::enqueue([](bool eligible) {
+            try {
+                const auto status = eligible ? opendojo::slot::clear_all()
+                                             : opendojo::slot::WriteStatus::StateChanged;
+                if (status == opendojo::slot::WriteStatus::Ok) {
+                    opendojo::autosave::on_manual_action();
+                    opendojo::slot_labels::clear_all();
+                    opendojo::slot::publish_snapshot(true);
+                    queue_export_form("", "", true);
+                } else {
+                    queue_toast(std::string("Couldn't clear drill: ") +
+                                    opendojo::slot::describe(status),
+                                true);
+                    g_clear_result.store(2);
+                }
+            } catch (...) {
+                queue_toast("Couldn't finish clearing the drill. Check the current slots.", true);
+                g_clear_result.store(2);
+            }
+        });
+        if (!g_clear_pending) show_toast("Couldn't queue Clear. Try again.", true);
+    }
+    nav_recenter();
+    ImGui::EndDisabled();
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::TextUnformatted(
+            "Clear all current slots, recording names, and the Export name/description.\nSaved "
+            "drill files are kept.");
+        ImGui::EndTooltip();
+    }
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
@@ -465,9 +496,6 @@ void draw_drills_tab() {
                 if (opendojo::ui::cell_action("Add##add")) {
                     auto r = opendojo::commands::load_drill(
                         d.path, opendojo::commands::LoadMode::AppendToFree);
-                    if (r.ok) {
-                        seed_export_form_from(d);
-                    }
                     show_toast(r.message, !r.ok);
                 }
                 nav_recenter();
@@ -475,9 +503,6 @@ void draw_drills_tab() {
                 if (opendojo::ui::cell_action("Replace##replace")) {
                     auto r = opendojo::commands::load_drill(
                         d.path, opendojo::commands::LoadMode::ReplaceAll);
-                    if (r.ok) {
-                        seed_export_form_from(d);
-                    }
                     show_toast(r.message, !r.ok);
                 }
                 nav_recenter();
@@ -929,6 +954,23 @@ void invalidate() {
     g_state.needs_focus = true;
 }
 
+void queue_export_form(std::string name, std::string description, bool cleared) {
+    std::lock_guard lock(g_pending.mtx);
+    g_pending.actions.push_back(
+        [name = std::move(name), description = std::move(description), cleared] {
+            opendojo::ui::copy_text(g_state.export_name, name);
+            opendojo::ui::copy_text(g_state.export_description, description);
+            if (cleared) {
+                g_clear_pending = false;
+                for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
+                    g_state.export_slot_names[i][0] = '\0';
+                    g_state.slot_label_mirror[i][0] = '\0';
+                }
+                show_toast("Cleared current drill and Export details.", false);
+            }
+        });
+}
+
 void queue_toast(std::string text, bool is_error) {
     std::lock_guard lk(g_pending.mtx);
     g_pending.toasts.push_back({std::move(text), is_error});
@@ -963,6 +1005,7 @@ void nav_recenter() {
 
 void draw() {
     drain_pending_ui_ops();
+    if (g_clear_result.exchange(0)) g_clear_pending = false;
     refresh_drills_if_needed();
 
     ImGuiViewport* vp = ImGui::GetMainViewport();

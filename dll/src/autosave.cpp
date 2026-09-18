@@ -315,6 +315,12 @@ bool is_enabled() {
     return g_s.enabled;
 }
 
+void on_manual_action() {
+    std::lock_guard lock(g_state_mutex);
+    clear_pending();
+    clear_watch();
+}
+
 void set_enabled(bool on) {
     std::lock_guard lock(g_state_mutex);
     ensure_initialized();

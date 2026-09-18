@@ -1,3 +1,4 @@
+#include "ui/text_buffers.hpp"
 #include "cloud/cloud_ui.hpp"
 
 #include "imgui.h"
@@ -207,8 +208,8 @@ struct BrowseState {
     // writes back on Save. ImGui owns the text-buffer memory.
     std::string edit_target_id;
     std::string edit_target_original_name;
-    char edit_name_buf[96] = "";
-    char edit_desc_buf[1024] = "";
+    char edit_name_buf[opendojo::ui::DRILL_NAME_BUFFER_SIZE] = "";
+    char edit_desc_buf[opendojo::ui::DESCRIPTION_BUFFER_SIZE] = "";
     bool edit_cat_picks[kCategoryCount] = {false, false, false, false, false};
     int edit_difficulty_idx = 0;  // matches kUploadDifficultyLabels — 0 = (none)
     bool edit_modal_open_requested = false;
@@ -361,25 +362,31 @@ void kick_list() {
         g_browse.loading = true;
         g_browse.error.clear();
     }
-    opendojo::cloud::worker::submit([q]() {
-        opendojo::cloud::api::ListResult r;
-        try {
-            r = opendojo::cloud::api::list_drills(q);
-        } catch (const std::exception& e) {
-            // Never let a parse/throw leave the tab stuck on "loading": the
-            // worker would swallow the exception and we'd never clear the flag.
-            OPENDOJO_LOG("cloud_ui: list_drills threw: %s", e.what());
-            r.ok = false;
-            r.error_message = "Couldn't load drills. Please try again.";
-        }
-        std::lock_guard lk(g_browse.mtx);
-        g_browse.loading = false;
-        if (r.ok) {
-            g_browse.results = std::move(r.drills);
-        } else {
-            g_browse.error = r.error_message;
-        }
-    });
+    opendojo::cloud::worker::submit(
+        [q]() {
+            opendojo::cloud::api::ListResult r;
+            try {
+                r = opendojo::cloud::api::list_drills(q);
+            } catch (const std::exception& e) {
+                // Never let a parse/throw leave the tab stuck on "loading": the
+                // worker would swallow the exception and we'd never clear the flag.
+                OPENDOJO_LOG("cloud_ui: list_drills threw: %s", e.what());
+                r.ok = false;
+                r.error_message = "Couldn't load drills. Please try again.";
+            }
+            std::lock_guard lk(g_browse.mtx);
+            g_browse.loading = false;
+            if (r.ok) {
+                g_browse.results = std::move(r.drills);
+            } else {
+                g_browse.error = r.error_message;
+            }
+        },
+        [] {
+            std::lock_guard lk(g_browse.mtx);
+            g_browse.loading = false;
+            g_browse.error = "Couldn't load drills. Please try again.";
+        });
 }
 
 void kick_toggle_like(const std::string& drill_id) {
@@ -559,35 +566,39 @@ void kick_upload(const std::string& name_in, const std::string& description_in) 
 
     g_upload.in_flight.store(true);
     set_upload_status("Uploading...", false);
-    opendojo::cloud::worker::submit([payload = std::move(p),
-                                     categories = std::move(picked_categories),
-                                     difficulty = std::move(picked_difficulty),
-                                     dll_ver = std::move(dll_ver), author = std::move(author)]() {
-        opendojo::cloud::api::SubmitArgs args;
-        args.name = payload.name;
-        args.description = payload.description;
-        args.character = payload.character;
-        args.cpu_side = payload.cpu_side;
-        args.recordings_count = payload.recordings_count;
-        args.content = payload.text;
-        args.categories = categories;
-        args.difficulty = difficulty;
-        args.dll_version = dll_ver;
-        args.author_handle = author;
+    opendojo::cloud::worker::submit(
+        [payload = std::move(p), categories = std::move(picked_categories),
+         difficulty = std::move(picked_difficulty), dll_ver = std::move(dll_ver),
+         author = std::move(author)]() {
+            opendojo::cloud::api::SubmitArgs args;
+            args.name = payload.name;
+            args.description = payload.description;
+            args.character = payload.character;
+            args.cpu_side = payload.cpu_side;
+            args.recordings_count = payload.recordings_count;
+            args.content = payload.text;
+            args.categories = categories;
+            args.difficulty = difficulty;
+            args.dll_version = dll_ver;
+            args.author_handle = author;
 
-        auto r = opendojo::cloud::api::submit_drill(args);
-        g_upload.in_flight.store(false);
-        if (!r.ok) {
-            set_upload_status(r.error_message.empty()
-                                  ? "Couldn't upload your drill. Please try again."
-                                  : r.error_message,
-                              true);
-            return;
-        }
-        set_upload_status(r.deduped ? "Identical drill already on OpenDojo Cloud"
-                                    : "Uploaded to OpenDojo Cloud",
-                          false);
-    });
+            auto r = opendojo::cloud::api::submit_drill(args);
+            g_upload.in_flight.store(false);
+            if (!r.ok) {
+                set_upload_status(r.error_message.empty()
+                                      ? "Couldn't upload your drill. Please try again."
+                                      : r.error_message,
+                                  true);
+                return;
+            }
+            set_upload_status(r.deduped ? "Identical drill already on OpenDojo Cloud"
+                                        : "Uploaded to OpenDojo Cloud",
+                              false);
+        },
+        [] {
+            g_upload.in_flight.store(false);
+            set_upload_status("Couldn't upload your drill. Please try again.", true);
+        });
 }
 
 }  // namespace
@@ -993,10 +1004,8 @@ void draw_cloud_tab() {
                 if (opendojo::ui::cell_action("Edit", row_height)) {
                     g_browse.edit_target_id = d.id;
                     g_browse.edit_target_original_name = d.name;
-                    std::snprintf(g_browse.edit_name_buf, sizeof(g_browse.edit_name_buf), "%s",
-                                  d.name.c_str());
-                    std::snprintf(g_browse.edit_desc_buf, sizeof(g_browse.edit_desc_buf), "%s",
-                                  d.description.c_str());
+                    opendojo::ui::copy_text(g_browse.edit_name_buf, d.name);
+                    opendojo::ui::copy_text(g_browse.edit_desc_buf, d.description);
                     // Seed tag pickers from current categories.
                     for (int ci = 0; ci < kCategoryCount; ++ci) {
                         g_browse.edit_cat_picks[ci] = false;
@@ -1392,15 +1401,17 @@ void poll_service_message() {
     last_kick = now;
 
     g_service_msg.in_flight.store(true);
-    opendojo::cloud::worker::submit([]() {
-        auto r = opendojo::cloud::api::get_service_message();
-        g_service_msg.in_flight.store(false);
-        // On failure keep showing whatever we had and retry next
-        // interval — a transient network blip shouldn't blank the bar.
-        if (!r.ok) return;
-        std::lock_guard lk(g_service_msg.mtx);
-        g_service_msg.text = r.present ? r.message : std::string{};
-    });
+    opendojo::cloud::worker::submit(
+        []() {
+            auto r = opendojo::cloud::api::get_service_message();
+            g_service_msg.in_flight.store(false);
+            // On failure keep showing whatever we had and retry next
+            // interval — a transient network blip shouldn't blank the bar.
+            if (!r.ok) return;
+            std::lock_guard lk(g_service_msg.mtx);
+            g_service_msg.text = r.present ? r.message : std::string{};
+        },
+        [] { g_service_msg.in_flight.store(false); });
 }
 
 std::string service_message() {

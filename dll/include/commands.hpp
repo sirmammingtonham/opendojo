@@ -91,8 +91,7 @@ struct ExportResult {
 // Each recording's name comes from slot_labels — the same store the
 // practice-menu rename reads — so whatever the player typed in the
 // Recordings tab is what lands in the file, and what the menu rows show
-// again after the drill is re-imported. An unnamed slot falls back to the
-// positional "slot N".
+// again after the drill is re-imported. Unnamed slots remain unnamed.
 //
 // Shared by the local-save, cloud-upload and autosave capture paths so all
 // three emit an identical recording set.

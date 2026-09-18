@@ -3,6 +3,7 @@
 #include "background_worker.hpp"
 #include "file_io.hpp"
 #include "write_batch.hpp"
+#include "ui/text_buffers.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -23,6 +24,20 @@ static void check(bool value) {
 }
 
 int main() {
+    {
+        char name[opendojo::ui::DRILL_NAME_BUFFER_SIZE];
+        char description[opendojo::ui::DESCRIPTION_BUFFER_SIZE];
+        std::string unicode;
+        for (int i = 0; i < 1000; ++i) unicode += "\xe9\xa2\xa8";
+        opendojo::ui::copy_text(description, unicode);
+        check(description == unicode);
+        opendojo::ui::copy_text(name, std::string(96, 'a'));
+        check(std::strlen(name) == 96);
+        char short_buffer[5];
+        opendojo::ui::copy_text(short_buffer, "ab\xe9\xa2\xa8");
+        check(std::string(short_buffer) == "ab");
+    }
+
     using namespace opendojo;
     using namespace std::chrono_literals;
     {
@@ -131,6 +146,22 @@ int main() {
         };
         check(file_io::replace_file(path, "original"));
         check(read() == "original");
+        check(file_io::create_file(path, "must not replace") == file_io::CreateResult::Exists);
+        check(read() == "original");
+        const auto raced = directory / L"concurrent.drill.txt";
+        std::atomic<int> saved{0}, existed{0};
+        auto create = [&] {
+            const auto result = file_io::create_file(raced, "complete content");
+            if (result == file_io::CreateResult::Saved) ++saved;
+            if (result == file_io::CreateResult::Exists) ++existed;
+        };
+        std::thread first(create), second(create);
+        first.join(); second.join();
+        check(saved == 1 && existed == 1);
+        std::ifstream raced_input(raced, std::ios::binary);
+        check(std::string(std::istreambuf_iterator<char>(raced_input), {}) == "complete content");
+        raced_input.close();
+        std::filesystem::remove(raced);
         auto held = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL, nullptr);
         check(held != INVALID_HANDLE_VALUE);

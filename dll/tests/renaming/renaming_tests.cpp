@@ -22,6 +22,17 @@ int main(int argc, char** argv) {
     using namespace opendojo;
     const std::string broken_header = "description: First line\r\nSecond line\r\n";
     const std::string valid_recording = "--- recording 1\nname: slot 1\nn . 5\n";
+    check(drill::decode_text("description: First\ndescription_line: |Second\ndescription_line: |\n" +
+                             valid_recording).drill.description == "First\nSecond\n",
+          "Pipe continuation fields append lines without duplicating the first");
+    check(!drill::decode_text("description: First\ndescription_line: missing delimiter\n" +
+                              valid_recording).error.empty(), "Malformed continuations must fail");
+    for (const auto* invalid : {"n . 18446744073709551617\n", "n . 256\n",
+             "n . 1 meta=100000000000020A0\n", "n . 1 mark=100000001\n",
+             "n . 1 aux=100\n", "kind: movelist\nmove_id: 123junk\n",
+             "kind: movelist\nmove_id: 4294967296\n"})
+        check(!drill::decode_text(std::string("--- recording 1\n") + invalid).error.empty(),
+              "Numeric overflow, range errors and trailing junk must be rejected");
     check(drill::decode_text("description: one\n\n  Tip: two # literal\n# literal\ncharacter: jin\n" +
                              valid_recording).drill.description == "one\n\n  Tip: two # literal\n# literal",
           "Legacy continuation preserves blank lines, indentation, colons and inline hashes");
@@ -154,7 +165,21 @@ int main(int argc, char** argv) {
              std::string(180, 'x')})
         d.recordings.push_back(drill::make_live_recording(name, bytes.data()));
     d.recordings.push_back(drill::make_movelist_recording("Move list", 123));
+    for (const auto* description : {"  First  \n|literal pipe\n\nLast\n", "", "\n", "|first\n|second", "a\r\nb\rc"}) {
+        auto sample = d;
+        sample.description = description;
+        const auto encoded = drill::encode_text(sample);
+        const auto parsed = drill::decode_text(encoded);
+        const auto expected = sample.description == "a\r\nb\rc" ? "a\nb\nc" : sample.description;
+        check(parsed.error.empty() && parsed.drill.description == expected,
+              "Literal continuations preserve whitespace, pipes and blank lines");
+        check(legacy_drill::decode_text(encoded).error.empty(), "Historical mods accept new exports");
+    }
     const auto text = drill::encode_text(d);
+    check(text.find("description: Practice #1: punish and repeat\n") != std::string::npos &&
+          text.find("description_line: |# literal hashtag\n") != std::string::npos &&
+          text.find("description_line: |Practice") == std::string::npos,
+          "Exports store the first description line once and pipe continuations");
     const auto current = drill::decode_text(text);
     const auto legacy = legacy_drill::decode_text(text);
     check(current.error.empty() && legacy.error.empty(), "Both decoders must accept named exports");
@@ -192,6 +217,16 @@ int main(int argc, char** argv) {
     check(drill::decode_text("# OpenDojo drill\nrecordings: 1\n--- recording 1\nn . 1\n")
           .drill.recordings[0].name.empty(), "Old files without names stay unnamed");
     if (argc > 1) { std::ofstream out(argv[1], std::ios::binary); out << text; }
+    if (argc > 1) {
+        auto large_description = d;
+        large_description.description.clear();
+        for (int i = 0; i < 6; ++i) {
+            if (i) large_description.description += '\n';
+            large_description.description += std::string(120, 'a');
+        }
+        std::ofstream out(std::string(argv[1]) + ".multiline", std::ios::binary);
+        out << drill::encode_text(large_description);
+    }
     d.author_handle = "Author\nauthor_handle: injected\r--- recording 9";
     const auto sanitized = drill::decode_text(drill::encode_text(d));
     check(sanitized.error.empty() && sanitized.drill.recordings.size() == d.recordings.size() &&

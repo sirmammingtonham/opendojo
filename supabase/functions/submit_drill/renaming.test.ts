@@ -20,3 +20,15 @@ Deno.test({
         assertEquals(result.ok.content, content);
     },
 });
+
+Deno.test({
+    name: "long multiline C++ export remains uploadable",
+    ignore: !fixture,
+    fn() {
+        const content = Deno.readTextFileSync(fixture! + ".multiline");
+        const result = validate({ name: "Audit", character: "jin", author_handle: "Tester",
+            recordings_count: 6, description: Array(6).fill("a".repeat(120)).join("\n"), content });
+        if ("err" in result) throw new Error(result.err);
+        assertEquals(result.ok.content, content);
+    },
+});

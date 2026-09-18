@@ -21,6 +21,6 @@ void stop();
 // Enqueue a job. Returns immediately. Jobs run in FIFO order on a
 // single thread, so a click that fires three jobs sees them complete
 // in click order.
-void submit(std::function<void()> job);
+void submit(std::function<void()> job, std::function<void()> on_failure = {});
 
 }  // namespace opendojo::cloud::worker

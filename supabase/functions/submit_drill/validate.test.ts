@@ -406,3 +406,18 @@ Deno.test("drillShapeError: line length is measured in chars, not bytes", () => 
     const c = "# OpenDojo drill\nrecordings: 1\n" + line + "\n--- recording 1\n";
     assertEquals(drillShapeError(c, 1), null);
 });
+
+Deno.test("description body lines support existing clients at the field limit", () => {
+    for (const description of ["a".repeat(1000), "?".repeat(1000),
+                              Array(10).fill("a".repeat(99)).join("\n")]) {
+        const content = "# OpenDojo drill\ndescription: " + description.replaceAll("\n", " ") +
+            "\ncharacter: jin\nrecordings: 1\n--- recording 1\nn . 1\n";
+        const result = validate(body({ description, content, recordings_count: 1 }));
+        if ("err" in result) throw new Error(result.err);
+    }
+});
+Deno.test("metadata exemption cannot hide oversized recording lines or a final line", () => {
+    const base = "# OpenDojo drill\nrecordings: 1\n--- recording 1\n";
+    assertStringIncludes(drillShapeError(base + "description: " + "a".repeat(600), 1)!, "longer than");
+    assertStringIncludes(drillShapeError(base + "n . 1 " + "a".repeat(600), 1)!, "longer than");
+});
