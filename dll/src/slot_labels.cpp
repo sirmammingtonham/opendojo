@@ -10,11 +10,15 @@ std::array<std::string, COUNT> g_names;
 std::mutex g_mtx;
 }  // namespace
 
-void set(std::size_t idx, std::string name) {
+std::size_t name_prefix_size(std::string_view name) {
+    return recording_name::prefix_size(name);
+}
+
+void set(std::size_t idx, std::string_view name) {
     if (idx >= COUNT) return;
-    if (name.find_first_not_of(" \t\r\n") == std::string::npos) name.clear();
+    auto safe_name = recording_name::normalize(name);
     std::lock_guard<std::mutex> lk(g_mtx);
-    g_names[idx] = std::move(name);
+    g_names[idx] = std::move(safe_name);
 }
 
 void clear_all() {

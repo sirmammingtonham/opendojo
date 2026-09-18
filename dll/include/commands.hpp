@@ -26,6 +26,7 @@ struct DrillHeader {
     std::filesystem::path path;
     std::string name;
     std::string description;
+    std::string author_handle;
     std::string character;                    // lowercase id; "unknown" if unset
     std::string cpu_side;                     // "p1" / "p2" / "" (unset)
     std::filesystem::file_time_type mtime{};  // filesystem mtime, drives "Newest" sort
@@ -128,13 +129,23 @@ struct SaveResult {
     std::filesystem::path path;
     std::string message;
 };
+struct DownloadMetadata {
+    // Cloud listing metadata, persisted with the recording content so the
+    // local library can show attribution/description without a network fetch.
+    std::string_view author_handle;
+    std::string_view description;
+    std::string_view character;
+    std::string_view cpu_side;
+};
 SaveResult save_drill_text(std::string_view display_name, std::string_view content,
-                           std::string_view cloud_id = {});
+                           std::string_view cloud_id = {},
+                           const DownloadMetadata* metadata = nullptr);
 
 // Compose an encoded drill (the same text export_current_slots would
 // write to disk) from the live slot state, plus the metadata the
 // upload API needs alongside it. Returns ok=false with `message` if
-// there are no recordings to capture. No filesystem I/O.
+// there are no recordings to capture or CPU character detection is unavailable.
+// No filesystem I/O.
 //
 // Used by the cloud Upload path so we can ship a drill straight to
 // the server without forcing a local file. The character / cpu_side

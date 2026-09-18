@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "drill.hpp"
+#include "description.hpp"
 #include "log.hpp"
 #include "memory.hpp"
 #include "players.hpp"
@@ -67,19 +68,24 @@ bool write_whole_file(const std::filesystem::path& p, const void* data, std::siz
 }
 
 // Parse just enough of a drill file to populate a DrillHeader. Reads up to
-// the first `---` line or 4 KiB, whichever comes first.
+// the first `---` line or 128 KiB, whichever comes first. Allow for UTF-8
+// descriptions, explicit blank continuation lines, and format comments.
 bool parse_header_only(const std::filesystem::path& path, DrillHeader& out) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     std::string line;
-    constexpr std::size_t LIMIT = 4096;
+    constexpr std::size_t LIMIT = 128 * 1024;
     std::size_t remaining = LIMIT;
+    opendojo::drill::DescriptionReader description_reader;
     out.path = path;
     while (file_io::bounded_getline(f, line, remaining)) {
         // Strip trailing \r from CRLF.
         if (!line.empty() && line.back() == '\r') line.pop_back();
         // Stop at the first recording marker.
         if (line.size() >= 3 && line.substr(0, 3) == "---") break;
+        const auto read = description_reader.read(line, out.description);
+        if (read == opendojo::drill::DescriptionReader::Result::Invalid) return false;
+        if (read == opendojo::drill::DescriptionReader::Result::Consumed) continue;
         if (line.empty() || line[0] == '#') continue;
         auto colon = line.find(':');
         if (colon == std::string::npos) continue;
@@ -101,6 +107,8 @@ bool parse_header_only(const std::filesystem::path& path, DrillHeader& out) {
             out.name = val;
         else if (key == "description")
             out.description = val;
+        else if (key == "author_handle")
+            out.author_handle = val;
         else if (key == "character")
             out.character = val;
         else if (key == "cpu_side")
@@ -364,6 +372,11 @@ DrillPayload build_current_slots_payload(std::string_view drill_name,
     DrillPayload r;
 
     auto cpu = opendojo::game_thread::current_cpu();
+    if (!cpu.detected || cpu.character_name.empty() || cpu.character_name == "unknown") {
+        r.message =
+            "CPU character not detected. Wait for practice mode to finish loading before sharing.";
+        return r;
+    }
 
     opendojo::drill::Drill d;
     d.name = drill_name.empty() ? timestamp_name() : std::string(drill_name);
@@ -415,8 +428,29 @@ std::string stamp_cloud_id(std::string_view content, std::string_view cloud_id) 
 }
 
 SaveResult save_drill_text(std::string_view display_name, std::string_view content,
-                           std::string_view cloud_id) {
+                           std::string_view cloud_id, const DownloadMetadata* metadata) {
     SaveResult r;
+    std::string enriched;
+    if (metadata) {
+        auto decoded = opendojo::drill::decode_text(content);
+        if (!decoded.error.empty()) {
+            r.message = "downloaded drill is invalid: " + decoded.error;
+            return r;
+        }
+        // The listing is the source of current metadata: edits on the server
+        // update these fields without rewriting the original uploaded content.
+        decoded.drill.name = display_name;
+        decoded.drill.author_handle = metadata->author_handle;
+        decoded.drill.description = metadata->description;
+        // Cloud metadata can be more complete than an older uploaded header.
+        // Never use the active character filter as the drill's identity.
+        if (!metadata->character.empty() && metadata->character != "unknown")
+            decoded.drill.character = metadata->character;
+        if (metadata->cpu_side == "p1" || metadata->cpu_side == "p2")
+            decoded.drill.cpu_side = metadata->cpu_side;
+        enriched = opendojo::drill::encode_text(decoded.drill);
+        content = enriched;
+    }
     if (!ensure_drills_dir()) {
         r.message = "couldn't create drills directory";
         return r;

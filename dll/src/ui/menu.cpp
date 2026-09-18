@@ -22,6 +22,7 @@
 #include "hooks/render_hook.hpp"
 #include "slot.hpp"
 #include "slot_labels.hpp"
+#include "ui/table_widgets.hpp"
 #include "subsystems.hpp"
 #include "ui/theme.hpp"
 
@@ -70,8 +71,10 @@ struct State {
     // differs from it, something else changed the label behind our back —
     // a drill load, or the CPU-character-change clear in render_hook — and
     // the edit box is refreshed from the store instead of overwriting it.
-    char export_slot_names[opendojo::slot::USER_SLOTS][64] = {};
-    char slot_label_mirror[opendojo::slot::USER_SLOTS][64] = {};
+    char export_slot_names[opendojo::slot::USER_SLOTS][opendojo::slot_labels::NAME_BUFFER_SIZE] =
+        {};
+    char slot_label_mirror[opendojo::slot::USER_SLOTS][opendojo::slot_labels::NAME_BUFFER_SIZE] =
+        {};
 
     // Export form buffers.
     char export_name[96] = "";
@@ -387,21 +390,29 @@ void draw_drills_tab() {
         const float row_h = ImGui::GetTextLineHeightWithSpacing() + kCellPadY * 2;
         // 6 data rows + header.
         const ImVec2 table_size(0, row_h * 7);
-        // Scale-aware width for the actions column — wide enough to fit
-        // all three buttons inline plus padding between them.
-        const auto pad = ImGui::GetStyle().FramePadding.x;
-        const auto isp = ImGui::GetStyle().ItemSpacing.x;
-        const float add_w = ImGui::CalcTextSize("Add").x + pad * 2;
-        const float repl_w = ImGui::CalcTextSize("Replace").x + pad * 2;
-        const float del_w = ImGui::CalcTextSize("Delete").x + pad * 2;
-        const float actions_w = add_w + repl_w + del_w + isp * 2 + pad * 2;
+        const float action_padding = ImGui::GetFontSize() * 1.25f;
+        const float add_w = ImGui::CalcTextSize("Add").x + action_padding;
+        const float repl_w = ImGui::CalcTextSize("Replace").x + action_padding;
+        const float del_w = ImGui::CalcTextSize("Delete").x + action_padding;
         ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,
                             ImVec2(ImGui::GetStyle().CellPadding.x, kCellPadY));
-        if (ImGui::BeginTable("drills", 4, flags, table_size)) {
+        if (ImGui::BeginTable("drills", 6, flags, table_size)) {
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.4f);
             ImGui::TableSetupColumn("Character", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-            ImGui::TableSetupColumn("Recordings", ImGuiTableColumnFlags_WidthStretch, 0.8f);
-            ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, actions_w);
+            ImGui::TableSetupColumn("Recordings", ImGuiTableColumnFlags_WidthFixed,
+                                    ImGui::CalcTextSize("Recordings").x);
+            ImGui::TableSetupColumn("Add",
+                                    ImGuiTableColumnFlags_WidthFixed |
+                                        ImGuiTableColumnFlags_NoHeaderLabel,
+                                    add_w);
+            ImGui::TableSetupColumn("Replace",
+                                    ImGuiTableColumnFlags_WidthFixed |
+                                        ImGuiTableColumnFlags_NoHeaderLabel,
+                                    repl_w);
+            ImGui::TableSetupColumn("Delete",
+                                    ImGuiTableColumnFlags_WidthFixed |
+                                        ImGuiTableColumnFlags_NoHeaderLabel,
+                                    del_w);
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableHeadersRow();
 
@@ -418,9 +429,26 @@ void draw_drills_tab() {
                 }
                 nav_recenter();
                 ImGui::SameLine();
-                ImGui::TextUnformatted(d.name.c_str());
-                if (!d.description.empty() && ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s", d.description.c_str());
+                const float title_width = (std::max)(1.0f, ImGui::GetContentRegionAvail().x);
+                const bool title_clipped = ImGui::CalcTextSize(d.name.c_str()).x > title_width;
+                const ImVec2 title_pos = ImGui::GetCursorScreenPos();
+                const ImVec2 title_end(title_pos.x + title_width,
+                                       title_pos.y + ImGui::GetTextLineHeight());
+                // Bound the hover target and text to the actual name cell.
+                ImGui::Dummy(ImVec2(title_width, ImGui::GetTextLineHeight()));
+                ImGui::PushClipRect(title_pos, title_end, true);
+                ImGui::GetWindowDrawList()->AddText(title_pos, ImGui::GetColorU32(ImGuiCol_Text),
+                                                    d.name.c_str());
+                ImGui::PopClipRect();
+                if (ImGui::BeginItemTooltip()) {
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 30.0f);
+                    if (title_clipped) ImGui::TextWrapped("%s", d.name.c_str());
+                    if (!d.author_handle.empty())
+                        ImGui::TextDisabled("by %s", d.author_handle.c_str());
+                    ImGui::TextWrapped("%s", d.description.empty() ? "No description."
+                                                                   : d.description.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndTooltip();
                 }
 
                 ImGui::TableSetColumnIndex(1);
@@ -434,7 +462,7 @@ void draw_drills_tab() {
                 ImGui::Text("%zu", d.recording_count);
 
                 ImGui::TableSetColumnIndex(3);
-                if (ImGui::SmallButton("Add##add")) {
+                if (opendojo::ui::cell_action("Add##add")) {
                     auto r = opendojo::commands::load_drill(
                         d.path, opendojo::commands::LoadMode::AppendToFree);
                     if (r.ok) {
@@ -443,8 +471,8 @@ void draw_drills_tab() {
                     show_toast(r.message, !r.ok);
                 }
                 nav_recenter();
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Replace##replace")) {
+                ImGui::TableSetColumnIndex(4);
+                if (opendojo::ui::cell_action("Replace##replace")) {
                     auto r = opendojo::commands::load_drill(
                         d.path, opendojo::commands::LoadMode::ReplaceAll);
                     if (r.ok) {
@@ -453,8 +481,8 @@ void draw_drills_tab() {
                     show_toast(r.message, !r.ok);
                 }
                 nav_recenter();
-                ImGui::SameLine();
-                if (destructive_small_button("Delete##delete")) {
+                ImGui::TableSetColumnIndex(5);
+                if (opendojo::ui::cell_action("Delete##delete", 0, true)) {
                     g_state.delete_path = d.path;
                     g_state.delete_name = d.name;
                     g_state.delete_modal_open_requested = true;
@@ -552,6 +580,57 @@ void draw_recordings_tab() {
 
     ImGui::Spacing();
 
+    // Keep controller navigation in short horizontal rows, ordered top to bottom.
+    // The optional description editor opens separately to leave room for all slots.
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##export_name", "Drill name (optional - defaults to a timestamp)",
+                             g_state.export_name, sizeof(g_state.export_name));
+    nav_recenter();
+    if (ImGui::Button(g_state.export_description[0] ? "Edit description..." : "Add description..."))
+        ImGui::OpenPopup("Export description");
+    nav_recenter();
+    if (g_state.export_description[0] && ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30);
+        ImGui::TextUnformatted(g_state.export_description);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 28, 0), ImGuiCond_Appearing);
+    if (ImGui::BeginPopup("Export description")) {
+        ImGui::TextDisabled("Description (optional)");
+        ImGui::InputTextMultiline(
+            "##export_desc", g_state.export_description, sizeof(g_state.export_description),
+            ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 5 + ImGui::GetStyle().FramePadding.y * 2),
+            ImGuiInputTextFlags_WordWrap);
+        nav_recenter();
+        if (ImGui::Button("Done")) ImGui::CloseCurrentPopup();
+        nav_recenter();
+        ImGui::EndPopup();
+    }
+    ImGui::Spacing();
+
+    const bool can_export = populated > 0;
+    if (!can_export) ImGui::BeginDisabled();
+    const float save_width = ImGui::CalcTextSize("Save drill locally").x +
+                             ImGui::GetStyle().FramePadding.x * 2;
+    if (ImGui::Button("Save drill locally", ImVec2(save_width, 0))) {
+        auto r = opendojo::commands::export_current_slots(g_state.export_name,
+                                                          g_state.export_description, "", "");
+        show_toast(r.message, !r.ok);
+        if (r.ok) g_state.drills_dirty = true;
+    }
+    nav_recenter();
+    if (!can_export) ImGui::EndDisabled();
+    const float share_width = ImGui::CalcTextSize("Share to OpenDojo Cloud").x +
+                              ImGui::GetStyle().FramePadding.x * 2;
+    if (ImGui::GetContentRegionAvail().x >=
+        save_width + ImGui::GetStyle().ItemSpacing.x + share_width)
+        ImGui::SameLine();
+    opendojo::cloud::ui::draw_share_card_body(can_export, g_state.export_name,
+                                              g_state.export_description);
+    if (!can_export) ImGui::TextDisabled("Record or select a move first.");
+    ImGui::Spacing();
+
     if (!in_practice) {
         ImGui::TextDisabled("Enter practice mode to record.");
     } else if (populated == 0) {
@@ -559,11 +638,13 @@ void draw_recordings_tab() {
     } else {
         const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                       ImGuiTableFlags_SizingStretchProp;
-        if (ImGui::BeginTable("recordings", 4, flags)) {
-            ImGui::TableSetupColumn("Recording", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        if (ImGui::BeginTable("recordings", 3, flags)) {
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-            ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            // Measure with the active font so UI scaling cannot clip these cells.
+            ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed,
+                                    ImGui::CalcTextSize("movelist").x);
+            ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthFixed,
+                                    ImGui::CalcTextSize("65535 events").x);
             ImGui::TableHeadersRow();
 
             for (std::size_t i = 0; i < opendojo::slot::USER_SLOTS; ++i) {
@@ -571,9 +652,6 @@ void draw_recordings_tab() {
                 if (k == opendojo::slot::Kind::Empty) continue;
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
-                ImGui::Text("Recording %zu", i + 1);
-
-                ImGui::TableSetColumnIndex(1);
                 // Refresh the box if the label store changed underneath us
                 // (drill load, or the character-change clear). Comparing
                 // against the mirror rather than against the box means a
@@ -586,13 +664,24 @@ void draw_recordings_tab() {
                                   sizeof(g_state.slot_label_mirror[i]), "%s", live.c_str());
                 }
                 ImGui::PushID(static_cast<int>(i));
-                // Match the text-only rows and stay inside the table cell.
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.0f, 0.0f));
-                ImGui::SetNextItemWidth(
-                    (std::max)(1.0f, (std::min)(ImGui::GetContentRegionAvail().x,
-                                                ImGui::GetFontSize() * 14.0f)));
-                if (ImGui::InputTextWithHint("##slot_name", "unnamed", g_state.export_slot_names[i],
-                                             sizeof(g_state.export_slot_names[i]))) {
+                // Edit directly in the cell, with the same inset as its text.
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+                ImGui::SetNextItemWidth((std::max)(1.0f, ImGui::GetContentRegionAvail().x));
+                char slot_hint[32];
+                std::snprintf(slot_hint, sizeof(slot_hint), "CPU Opponent Action %zu", i + 1);
+                if (ImGui::InputTextWithHint(
+                        "##slot_name", slot_hint, g_state.export_slot_names[i],
+                        sizeof(g_state.export_slot_names[i]), ImGuiInputTextFlags_CallbackEdit,
+                        [](ImGuiInputTextCallbackData* data) -> int {
+                            const auto keep = opendojo::slot_labels::name_prefix_size(
+                                std::string_view(data->Buf, data->BufTextLen));
+                            if (keep < static_cast<std::size_t>(data->BufTextLen))
+                                data->DeleteChars(static_cast<int>(keep),
+                                                  data->BufTextLen - static_cast<int>(keep));
+                            return 0;
+                        })) {
                     // Apply on every keystroke. practice_rename polls
                     // slot_labels, so the in-game row follows within one
                     // scan (~0.5 s).
@@ -601,14 +690,15 @@ void draw_recordings_tab() {
                                   sizeof(g_state.slot_label_mirror[i]), "%s",
                                   g_state.export_slot_names[i]);
                 }
-                ImGui::PopStyleVar();
+                ImGui::PopStyleColor();
+                ImGui::PopStyleVar(2);
                 if (ImGui::IsItemHovered() && !live.empty()) ImGui::SetTooltip("%s", live.c_str());
                 nav_recenter();
                 ImGui::PopID();
 
-                ImGui::TableSetColumnIndex(2);
+                ImGui::TableSetColumnIndex(1);
                 ImGui::TextUnformatted(opendojo::slot::kind_name(k));
-                ImGui::TableSetColumnIndex(3);
+                ImGui::TableSetColumnIndex(2);
                 if (k == opendojo::slot::Kind::MoveList) {
                     ImGui::TextUnformatted("saved");
                 } else {
@@ -617,91 +707,10 @@ void draw_recordings_tab() {
             }
             ImGui::EndTable();
         }
-        ImGui::TextDisabled(
-            "Name a recording to relabel its row in the game's practice menu. "
-            "Names are saved into the drill file.");
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("Name a recording to relabel its row in the game's practice menu.");
+        ImGui::PopStyleColor();
     }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Shared name + description for both Save and Share. Stretches
-    // full width so users get a real text field, not a cramped
-    // 420-pixel one carried over from the old single-column form.
-    ImGui::PushItemWidth(-1);
-    ImGui::InputText("##export_name", g_state.export_name, sizeof(g_state.export_name));
-    nav_recenter();
-    ImGui::PopItemWidth();
-    ImGui::TextDisabled("Name (leave blank for an auto timestamp)");
-
-    ImGui::Spacing();
-
-    ImGui::InputTextMultiline(
-        "##export_desc", g_state.export_description, sizeof(g_state.export_description),
-        ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 4 + ImGui::GetStyle().FramePadding.y * 2),
-        ImGuiInputTextFlags_WordWrap);
-    nav_recenter();
-    ImGui::TextDisabled("Description (optional, up to 1000 chars)");
-
-    ImGui::Spacing();
-    ImGui::Spacing();
-
-    // ---- Two-card layout: Save locally | Share with community ------------
-    // Cards are equal width and equal height so neither feels secondary.
-    // Card height is fixed to fit the taller of the two (the Share card
-    // with tags + difficulty + handle + button + status line); the Save
-    // card pads its top so its button bottom-aligns near the Share button.
-    const bool can_export = populated > 0;
-
-    // 2-column table for the cards instead of two BeginChild blocks.
-    // The crucial difference: table cells render content INTO the
-    // current window, so nav_recenter() called on widgets inside
-    // (e.g. the Save button) drives the menu window's scroll. With
-    // BeginChild the widgets sat in a no-scroll child window and our
-    // SetScrollY calls had no effect on the parent — focused widgets
-    // at the bottom of the tab couldn't snap the scrollbar to its rail.
-    //
-    // We use BordersInner/Outer for the card look and bump CellPadding
-    // so content sits with the same breathing room a child window's
-    // WindowPadding would have given it.
-    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(12.0f, 12.0f));
-    const ImGuiTableFlags kCardTableFlags = ImGuiTableFlags_BordersInnerV |
-                                            ImGuiTableFlags_BordersOuter |
-                                            ImGuiTableFlags_SizingStretchSame;
-    if (ImGui::BeginTable("cards", 2, kCardTableFlags)) {
-        // -- Save locally card --
-        ImGui::TableNextColumn();
-        ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Save locally");
-        ImGui::Spacing();
-        ImGui::TextWrapped(
-            "Writes a .drill.txt file to your opendojo/ folder so you can "
-            "load it again from the Drills tab.");
-        ImGui::Spacing();
-        if (!can_export) ImGui::BeginDisabled();
-        if (ImGui::Button("Save drill", ImVec2(-FLT_MIN, 0))) {
-            auto r = opendojo::commands::export_current_slots(
-                g_state.export_name, g_state.export_description,
-                "" /* character: always autodetected */, "" /* cpu_side: always use detection */);
-            show_toast(r.message, !r.ok);
-            if (r.ok) g_state.drills_dirty = true;
-        }
-        nav_recenter();
-        if (!can_export) ImGui::EndDisabled();
-        if (!can_export) {
-            ImGui::TextDisabled("(record or pick a move first)");
-        }
-
-        // -- Share with community card --
-        ImGui::TableNextColumn();
-        ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.0f, 1), "Share with community");
-        ImGui::Spacing();
-        opendojo::cloud::ui::draw_share_card_body(can_export, g_state.export_name,
-                                                  g_state.export_description);
-
-        ImGui::EndTable();
-    }
-    ImGui::PopStyleVar();
 }
 
 // Render a user-readable label for a Win32 virtual-key code. Uses

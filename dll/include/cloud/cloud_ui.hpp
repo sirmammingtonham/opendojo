@@ -13,11 +13,9 @@ namespace opendojo::cloud::ui {
 // filter, result list cache) inside the .cpp.
 void draw_cloud_tab();
 
-// Draw the contents of the "Share with community" card on the
-// Export tab: tag chips, difficulty combo, author handle line,
-// "Share to OpenDojo Cloud" button, and the persistent last-upload
-// status line. Caller is responsible for placing the card (e.g. a
-// child window with a border) and rendering the card header.
+// Draw the visible Share action in the Export tab's action row.
+// A Share options popup contains tags, difficulty, and author attribution;
+// the last-upload status appears below the actions. Caller renders the form.
 // Disabled if `can_export` is false or cloud is not configured.
 // `name` / `description` are pointers to the menu form buffers —
 // uploads use the same values the local Export would have written.

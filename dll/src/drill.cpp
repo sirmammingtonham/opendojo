@@ -1,4 +1,6 @@
 #include "drill.hpp"
+#include "description.hpp"
+#include "recording_name.hpp"
 
 #include <algorithm>
 #include <array>
@@ -314,10 +316,7 @@ void encode_recording(std::string& out, const Recording& r, std::size_t idx_one_
     out += hdr;
     // Keep the existing name field readable by older mods. Never let a
     // pasted newline create another recording/header, or truncate UTF-8.
-    std::string name = r.name;
-    std::replace_if(
-        name.begin(), name.end(), [](char c) { return c == '\r' || c == '\n' || c == '\0'; }, ' ');
-    out += "name:         " + name + "\n";
+    out += "name:         " + recording_name::normalize(r.name) + "\n";
     // Only emit `kind:` for non-live; old files implicitly mean live.
     if (r.kind != Kind::Live) {
         out += "kind:         movelist\n";
@@ -413,7 +412,8 @@ Recording make_movelist_recording(std::string name, std::uint32_t move_id) {
 // Single-line a field: CR/LF would break the line-based text format.
 static std::string one_line(std::string_view s) {
     std::string out(s);
-    std::replace_if(out.begin(), out.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
+    std::replace_if(
+        out.begin(), out.end(), [](char c) { return c == '\n' || c == '\r' || c == '\0'; }, ' ');
     return out;
 }
 
@@ -425,6 +425,23 @@ std::string encode_text(const Drill& d) {
     out += "# OpenDojo drill\n";
     out += "name:         " + one_line(d.name) + "\n";
     out += "description:  " + one_line(d.description) + "\n";
+    // Older mods retain the flattened fallback. Explicit continuation fields
+    // preserve newlines without letting user text become headers or recordings.
+    if (d.description.find_first_of("\r\n") != std::string::npos) {
+        std::size_t pos = 0;
+        do {
+            auto end = d.description.find_first_of("\r\n", pos);
+            if (end == std::string::npos) end = d.description.size();
+            out += "description_line: |" +
+                   one_line(std::string_view(d.description).substr(pos, end - pos)) + "\n";
+            if (end == d.description.size()) break;
+            pos = end + 1;
+            if (d.description[end] == '\r' && pos < d.description.size() &&
+                d.description[pos] == '\n')
+                ++pos;
+        } while (pos <= d.description.size());
+    }
+    if (!d.author_handle.empty()) out += "author_handle: " + one_line(d.author_handle) + "\n";
     std::snprintf(buf, sizeof(buf), "character:    %s\n",
                   d.character.empty() ? "unknown" : d.character.c_str());
     out += buf;
@@ -459,6 +476,11 @@ std::string encode_text(const Drill& d) {
 
 TextResult decode_text(std::string_view text) {
     TextResult result;
+    if (text.size() > 4u * 1024u * 1024u) {
+        result.error = "drill exceeds 4 MiB";
+        return result;
+    }
+    DescriptionReader description_reader;
 
     enum class Section { Drill, Recording };
     Section section = Section::Drill;
@@ -490,17 +512,36 @@ TextResult decode_text(std::string_view text) {
         if (pos < text.size() && text[pos] == '\r') ++pos;
         if (pos < text.size() && text[pos] == '\n') ++pos;
         if (raw_line.empty() && pos >= text.size()) break;
+        if (section == Section::Drill) {
+            if (pos > 128u * 1024u) {
+                result.error = "drill header exceeds 128 KiB";
+                return result;
+            }
+            const auto read = description_reader.read(raw_line, result.drill.description);
+            if (read == DescriptionReader::Result::Invalid) {
+                result.error = "invalid or oversized description";
+                return result;
+            }
+            if (read == DescriptionReader::Result::Consumed) continue;
+        }
 
-        // A recording name is literal text: '#' is common in move labels.
-        // Event lines and all other headers retain their comment semantics.
+        // User-facing metadata is literal text: '#' can occur in names,
+        // author handles, or descriptions. Other lines retain comments.
         std::string_view raw_key, raw_val;
-        const bool literal_name = section == Section::Recording &&
-                                  parse_kv(trim(raw_line), raw_key, raw_val) && raw_key == "name";
+        const bool literal_name =
+            parse_kv(trim(raw_line), raw_key, raw_val) &&
+            (raw_key == "name" || (section == Section::Drill &&
+                                   (raw_key == "description" || raw_key == "author_handle")));
         auto line = trim(literal_name ? raw_line : strip_comment(raw_line));
         if (line.empty()) continue;
 
         if (is_section_marker(line)) {
             flush_recording();
+            if (result.drill.recordings.size() >= 8) {
+                result.error = "drill contains more than 8 recordings";
+                result.drill.recordings.clear();
+                return result;
+            }
             section = Section::Recording;
             // Allow `--- recording N` or `--- recording N: name` styles; we
             // recover `name` from the per-recording `name:` field, so the
@@ -521,6 +562,8 @@ TextResult decode_text(std::string_view text) {
                 result.drill.name = std::string(val);
             else if (key == "description")
                 result.drill.description = std::string(val);
+            else if (key == "author_handle")
+                result.drill.author_handle = std::string(val);
             else if (key == "character")
                 result.drill.character = std::string(val);
             else if (key == "cpu_side")
@@ -533,7 +576,7 @@ TextResult decode_text(std::string_view text) {
         } else {  // Section::Recording
             if (is_header) {
                 if (key == "name")
-                    current.name = std::string(val);
+                    current.name = recording_name::from_file(val);
                 else if (key == "kind") {
                     if (val == "movelist")
                         current.kind = Kind::MoveList;
