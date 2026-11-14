@@ -181,7 +181,7 @@ endif()
 # shown in the About tab so users know which patch this build was tested
 # against. NOT read from the running game and NOT recorded on uploads;
 # bump it manually when you finish validating a new patch.
-set(OPENDOJO_TEKKEN_VERSION "3.02.02"
+set(OPENDOJO_TEKKEN_VERSION "3.03.01"
     CACHE STRING "Tekken 8 patch this DLL was confirmed working on")
 
 target_compile_definitions(opendojo PRIVATE

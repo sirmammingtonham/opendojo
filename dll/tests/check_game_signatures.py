@@ -5,6 +5,7 @@ execute game code. Checks unique matches, unwind entries and data references.
 This checks code relocation compatibility, not live object layouts or gameplay.
 """
 import argparse
+import bisect
 import pathlib
 import re
 import struct
@@ -44,6 +45,21 @@ def main():
     for at in range(exception_raw, exception_raw + exception_size, 12):
         begin, end, _ = struct.unpack_from("<III", data, at)
         functions[begin] = end
+    function_begins = sorted(functions)
+
+    # The production resolver (signatures.cpp) treats several of these
+    # patterns as body anchors: it maps the anchor's RVA to whatever function
+    # CONTAINS it (via the unwind table), not to a function whose entry
+    # equals the anchor's own address. A patch can shift the anchor to sit
+    # mid-function (e.g. identical-code-folding changes) without that being
+    # a real regression, so this check must use containment, not equality.
+    def containing_function_end(rva):
+        i = bisect.bisect_right(function_begins, rva) - 1
+        if i < 0:
+            return None
+        begin = function_begins[i]
+        end = functions[begin]
+        return end if begin <= rva < end else None
 
     def matches(notation, blob):
         pattern = b"".join(b"." if b == "??" else re.escape(bytes([int(b, 16)]))
@@ -75,7 +91,8 @@ def main():
             rva = text[1] + hits[0]
             resolved[symbol] = rva
             if symbol in ("PRACTICE_DTOR_SIG", "PLAYER_REFRESH_SIG", "POOL_INIT_SIG"):
-                assert rva in functions, f"{symbol}: not an unwind function entry"
+                assert containing_function_end(rva) is not None, \
+                    f"{symbol}: not inside any unwind function range"
             print(f"{symbol}: unique RVA 0x{rva:X}")
 
     for symbol, window, notation, disp, length in [
@@ -83,7 +100,8 @@ def main():
         ("POOL_INIT_SIG", 0x40, "48 39 05 ?? ?? ?? ?? 75", 3, 7),
     ]:
         start = resolved[symbol]
-        length_bytes = min(window, functions[start] - start)
+        end = containing_function_end(start)
+        length_bytes = min(window, end - start) if end else window
         at = raw_offset(start)
         hits = matches(notation, data[at:at + length_bytes])
         assert len(hits) == 1, f"{symbol}: {len(hits)} data references"

@@ -99,7 +99,10 @@ constexpr Pattern SLOT_FLAGS_SIG{"slot_flags",
 constexpr Pattern SESSION_COUNTER_SIG{"session_counter",
                                       "48 8B CB E8 ?? ?? ?? ?? 8B 80 ?? ?? ?? ?? 39 06"};
 constexpr Pattern SUBB_PAUSE_SIG{"pause_transition", "80 79 ?? 00 0F B6 DA 48 8B F9"};
-constexpr Pattern SUBC_RESET_SIG{"side_record_reset", "48 0F BE C7 48 69 C8 ?? ?? ?? ??"};
+// Only the sign-extend is a stable anchor: the 3.03.01 patch replaced the
+// `imul rcx, rax, imm32` stride multiply with an equivalent `lea+shl` (see
+// side_record_at), so the anchor itself must not include the multiply.
+constexpr Pattern SUBC_RESET_SIG{"side_record_reset", "48 0F BE C7"};
 constexpr Pattern RECORDING_STATE_SIG{"recording_state", "89 7B ?? 89 7B ?? 83 EF 01"};
 
 constexpr Pattern CHARACTER_JACK_SIG{
@@ -736,20 +739,43 @@ static std::optional<std::uint32_t> pause_at(const native_scan::Function& fn) {
 static std::optional<std::uint32_t> side_record_at(const native_scan::Function& fn) {
     using namespace native_scan;
     const auto zero = unique(fn, "33 F6");
-    const auto loop = unique(
+    // The multiply that turns the sign-extended side index into a byte offset
+    // (movsx rax, dil; <rax * stride> -> rcx) has taken at least two shapes
+    // across patches: a single `imul rcx, rax, imm32`, and (since the
+    // 3.03.01 patch) an equivalent `lea rcx, [rax+rax*2]; shl rcx, imm8`
+    // (i.e. rax * 3 << shift). Try both; only the decoded stride differs.
+    const auto mul_imm = unique(fn, "48 0F BE C7 48 69 C8 ?? ?? ?? ??");
+    const auto mul_lea = unique(fn, "48 0F BE C7 48 8D 0C 40 48 C1 E1 ??");
+    std::uintptr_t mul_start = 0, mul_end = 0;
+    std::uint32_t stride = 0;
+    if (mul_imm) {
+        mul_start = mul_imm[0].address;
+        mul_end = mul_imm[1].address + mul_imm[1].decoded.len;
+        stride = mul_imm[1].decoded.imm.imm32;
+    } else if (mul_lea) {
+        mul_start = mul_lea[0].address;
+        mul_end = mul_lea[2].address + mul_lea[2].decoded.len;
+        stride = 3u << mul_lea[2].decoded.imm.imm8;
+    } else {
+        return {};
+    }
+    const auto tail = unique(
         fn,
-        "48 0F BE C7 48 69 C8 ?? ?? ?? ?? "
         "48 89 B4 19 ?? ?? ?? ?? 48 89 B4 19 ?? ?? ?? ?? 48 89 B4 19 ?? ?? ?? ?? "
         "89 B4 19 ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 03 CB E8 ?? ?? ?? ?? FF C7 83 FF 02 7C ??");
-    if (!zero || !loop || zero[0].address >= loop[0].address ||
-        loop[11].relative() != loop[0].address)
+    // The loop re-reads the (incremented) side index each iteration, so it
+    // jumps back to the sign-extend/multiply at the top, not to this tail's
+    // first store.
+    if (!zero || !tail || zero[0].address >= mul_start || tail[0].address != mul_end ||
+        tail[9].relative() != mul_start)
         return {};
-    const auto item_fn = helper(code_image(), loop[8].relative());
-    const auto item = unique(item_fn,
-                             "33 D2 48 C7 41 ?? FF FF FF FF 33 C0 48 89 11 "
-                             "48 89 51 ?? 0F 57 C0 48 89 51 ??");
+    // Only the member-initializing prefix is a stable anchor: the 3.03.01
+    // patch reordered the subsequent zero-stores relative to an unrelated
+    // `xorps xmm0, xmm0`, which this contract doesn't need anyway.
+    const auto item_fn = helper(code_image(), tail[6].relative());
+    const auto item = unique(item_fn, "33 D2 48 C7 41 ?? FF FF FF FF 33 C0 48 89 11");
     if (!item) return {};
-    const auto stride = loop[1].decoded.imm.imm32, base = loop[6].decoded.imm.imm32;
+    const auto base = tail[4].decoded.imm.imm32;
     const auto member = item[1].displacement();
     if (base < 4 || base >= 0x10000 || stride < 64 || stride >= 0x10000 || stride % 8 ||
         member < 0 || member >= 128 || member + 8u > stride || (base + stride + member) % 4)
