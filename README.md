@@ -142,7 +142,7 @@ everything else works normally.
 
 ## Compatibility
 
-- Tekken 8 v3.01.01. Other versions may shift the memory offsets the mod uses — they'd need re-resolving.
+- Tekken 8 v3.03.01 (Roger Jr. patch). Other versions may shift the memory offsets the mod uses — they'd need re-resolving.
 - Windows 10/11, x64.
 - Should coexist with other `dinput8.dll`-style proxy mods only if you stack
   them via an injector — both can't live at the same filename.
