@@ -3,6 +3,10 @@
 Tekken 8 practice-mode tool. Save, share, and reload practice mode recordings
 recordings as portable drill files. 
 
+[DOWNLOAD LIN](https://github.com/sirmammingtonham/opendojo/releases/latest/download/dinput8.dll)[K](https://www.reddit.com/r/github/s/3X6By7KncS)
+
+----
+
 A drill is a byte-perfect copy of Tekken's in-engine practice recording. Once
 loaded, the game plays it back exactly as if you'd just finished recording it
 yourself. 
