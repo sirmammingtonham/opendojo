@@ -600,3 +600,53 @@ Robust runtime resolution (used by dll/src/practice_rename.cpp instead of a hard
 This self-check + scan makes FName decoding survive future base-RVA moves. Found via CE: `AOBScan` for a pool candidate then decode idx 999 == "ID" to confirm.
 
 The GryphonLocalization text API lives in module /Script/GryphonLocalization (NOT /Script/Polaris): UGryphonFunctionLibrary::GetString(FString TextID) -> FString resolves a Gryphon text-id to its display string. Call on the class CDO via ProcessEvent. Practice option rows store their text-id as the list_item.Text FString (e.g. "TEXT_000_UI_PRACTICE_001"); the right-pane option rows (incl. "CPU Opponent Action N") are WBP_UI_PracticeMenu_Button_2_C (Button_1 is the left settings list).
+
+----
+
+## 2026-11-14 patch (3.03.01, the Roger Jr. release)
+
+Verified offline against the installed `Polaris-Win64-Shipping.exe` by mapping it
+as inert data (mmap'd at its own PE ImageBase, no game code executed) and running
+the actual production `opendojo::signatures::resolve_all()` unmodified, with the
+kernel32 imports it checks by address (GetCurrentThreadId/ReleaseSemaphore/
+WaitForSingleObject/SwitchToFiber) bound in the mapped image's IAT exactly as the
+Windows loader would. `resolve_all()` now returns true end-to-end; every layout
+getter resolves. This is a stronger check than `check_game_signatures.py` alone
+(see below) because it exercises the real discovery/validation code, including
+call-graph-based disambiguation, not just raw byte uniqueness.
+
+One signature broke, both sub-issues inside `side_record_at` (side_record_reset):
+
+1. The stride multiply changed shape. Old: `movsx rax, dil; imul rcx, rax, imm32`
+   (stride baked as one immediate). New: `movsx rax, dil; lea rcx, [rax+rax*2];
+   shl rcx, 7` — i.e. `rax * 3 << 7` = the same `rax * 384` (stride moved from
+   0x160 to 0x180), just compiler-chosen strength reduction instead of a plain
+   imul-immediate. `SUBC_RESET_SIG` shortened to the shared `48 0F BE C7`
+   (movsx) prefix; `side_record_at` now tries both the imul-immediate shape and
+   the lea+shl shape and decodes stride from whichever matches.
+2. The reset body's zero-store order changed: `xorps xmm0, xmm0` moved earlier
+   (right after the first `mov [rcx], rdx`) relative to the remaining zero
+   stores — a harmless scheduler reorder with no dependency reason to stay put.
+   The `item` pattern (in the called record initializer) only needed the
+   `member` field from the leading `mov qword[rcx+member], -1`, so it's now
+   anchored on just the stable prefix through `mov [rcx], rdx`, dropping the
+   reordered tail from the match.
+
+`base` (0xD0) and `member` (0x2C) are unchanged; only the stride codegen shape
+moved. Fixing this also re-enabled `live_recordings_supported()`, which gates on
+`g_recording_state_ready` — it wasn't a second independent regression.
+
+Also worth recording: `check_game_signatures.py` crashed on `PRACTICE_DTOR_SIG`
+with "not an unwind function entry" before any of the above was investigated.
+That assertion was simply wrong — `PRACTICE_DTOR_SIG`, `PLAYER_REFRESH_SIG` and
+`POOL_INIT_SIG` are all *body* anchors in the real resolver (`fn.begin` comes
+from mapping the anchor through the unwind table via `native_scan::function()`,
+not from the anchor's own address), so the anchor byte position moving
+mid-function (e.g. from identical-code-folding changes elsewhere) is not itself
+a regression. The script now checks containment in the unwind table instead of
+exact equality with a function's start, which is what the real resolver
+actually relies on. `GET_CTX_SIG` still can't be checked by this script's naive
+global-uniqueness scan (172 raw matches — it's a generic one-line getter stub
+disambiguated in the real resolver only via its caller's call graph); that's a
+pre-existing limitation of the script, not a 3.03.01 regression, and is out of
+scope to fix without re-implementing call-graph traversal in Python.
