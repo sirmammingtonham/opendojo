@@ -1,6 +1,6 @@
 # OpenDojo
 
-Tekken 8 practice-mode tool. Save, share, and reload practice mode recordings
+Tekken 8 practice-mode tool. Save, share, and reload practice mode
 recordings as portable drill files. 
 
 [DOWNLOAD LIN](https://github.com/sirmammingtonham/opendojo/releases/latest/download/dinput8.dll)[K](https://www.reddit.com/r/github/s/3X6By7KncS)
